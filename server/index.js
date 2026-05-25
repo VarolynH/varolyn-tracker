@@ -1,5 +1,9 @@
 'use strict';
 
+// Prevent unhandled errors from silently crashing
+process.on('uncaughtException', (e) => { console.error('[FATAL] Uncaught:', e.message, e.stack); });
+process.on('unhandledRejection', (e) => { console.error('[FATAL] Unhandled rejection:', e?.message || e); });
+
 const Fastify    = require('fastify');
 const cors       = require('@fastify/cors');
 const helmet     = require('@fastify/helmet');
@@ -51,11 +55,15 @@ const db = new Pool(dbConfig);
 
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const redisOpts = {
-  lazyConnect: true, maxRetriesPerRequest: 3,
+  lazyConnect: true, maxRetriesPerRequest: 3, retryStrategy: (times) => Math.min(times * 500, 5000),
   ...(REDIS_URL.startsWith('rediss://') ? { tls: { rejectUnauthorized: false } } : {}),
 };
 const redisPub = new Redis(REDIS_URL, redisOpts);
 const redisSub = new Redis(REDIS_URL, redisOpts);
+
+// CRITICAL: Attach error handlers to prevent unhandled error crashes
+redisPub.on('error', (e) => console.warn('[REDIS-PUB] Error:', e.message));
+redisSub.on('error', (e) => console.warn('[REDIS-SUB] Error:', e.message));
 
 const kalmanFilters = new Map();
 const sseClients    = new Map();
@@ -642,8 +650,20 @@ async function build() {
 // ═══════════════════════════════════════════════════════
 async function start() {
   const server = await build();
-  await redisPub.connect();
-  await redisSub.connect();
+
+  // Connect to Redis with retry
+  for (let attempt = 1; attempt <= 5; attempt++) {
+    try {
+      await redisPub.connect();
+      await redisSub.connect();
+      console.log('[REDIS] Connected');
+      break;
+    } catch (e) {
+      console.warn(`[REDIS] Attempt ${attempt}/5 failed: ${e.message}`);
+      if (attempt === 5) throw e;
+      await new Promise(r => setTimeout(r, 2000 * attempt));
+    }
+  }
 
   // ── Auto-create tables if they don't exist (for cloud deploy) ──
   try {
