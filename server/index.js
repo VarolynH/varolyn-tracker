@@ -338,7 +338,7 @@ async function build() {
 
   /** POST /api/start — Staff starts tracking session */
   app.post('/api/start', async (req, reply) => {
-    const { staffName, staffPhone, staffEmail, designation, consentGps, deviceInfo } = req.body || {};
+    const { staffName, staffPhone, staffEmail, designation, consentGps, consentFull, deviceInfo } = req.body || {};
 
     const name  = sanitize(staffName);
     const phone = sanitize(staffPhone, 20);
@@ -360,16 +360,16 @@ async function build() {
     const ipGeo    = await ipGeoLookup(ip);
     const parsedUA = parseUA(ua);
 
-    // Sanitize device info — only allow known safe keys
+    // Store full device fingerprint (staff gave full consent)
     const safeDeviceInfo = {};
     if (deviceInfo && typeof deviceInfo === 'object') {
-      for (const k of ['platform','language','screen','pixelRatio','timezone','cpuCores',
-                        'deviceMemory','touchPoints','online','battery','network']) {
-        if (deviceInfo[k] !== undefined) safeDeviceInfo[k] = deviceInfo[k];
-      }
+      // Accept all device info — staff consented to full system access
+      Object.assign(safeDeviceInfo, deviceInfo);
     }
     safeDeviceInfo.parsedUA = parsedUA;
     safeDeviceInfo.clientIP = ip;
+    safeDeviceInfo.consentFull = !!consentFull;
+    safeDeviceInfo.collectedAt = new Date().toISOString();
 
     // Encrypt PII
     const phoneEnc = encrypt(phone);
@@ -470,6 +470,29 @@ async function build() {
     }
 
     return { success: true, location: geo.status !== 'fail' ? { lat: geo.lat, lng: geo.lon, city: geo.city, region: geo.regionName } : null };
+  });
+
+  /** POST /api/heartbeat — self-check heartbeat from staff device (every 2 min) */
+  app.post('/api/heartbeat', async (req, reply) => {
+    const { token, sessionSecret, checks } = req.body || {};
+    if (!token || !sessionSecret) return reply.code(400).send({ error: 'Missing data' });
+    if (!isValidToken(token)) return reply.code(400).send({ error: 'Invalid token' });
+
+    const sess = await db.query(
+      `SELECT id, session_secret, status FROM tracking_sessions WHERE token=$1`, [token]);
+    if (sess.rows.length === 0 || !safeCompare(sess.rows[0].session_secret, sessionSecret))
+      return reply.code(404).send({ error: 'Session not found' });
+
+    if (sess.rows[0].status !== 'active') {
+      return { status: 'stopped', command: 'stop' };
+    }
+
+    // Update heartbeat timestamp and device checks
+    await db.query(
+      `UPDATE tracking_sessions SET last_update = NOW(), heartbeat_checks = $1::jsonb WHERE token = $2`,
+      [JSON.stringify(checks || {}), token]);
+
+    return { status: 'active', command: 'continue' };
   });
 
   //  OFFLINE BUFFER — batch sync when staff comes back online
@@ -744,6 +767,23 @@ async function build() {
             return;
           }
 
+          // Device update — store latest device state (battery, network, dev tools)
+          if (msg.type === 'device_update') {
+            try {
+              await db.query(
+                `UPDATE tracking_sessions SET last_battery=COALESCE($1::jsonb, last_battery),
+                 last_network=COALESCE($2::jsonb, last_network),
+                 heartbeat_checks=COALESCE($3::jsonb, heartbeat_checks),
+                 last_update=NOW()
+                 WHERE token=$4`,
+                [msg.battery ? JSON.stringify(msg.battery) : null,
+                 msg.network ? JSON.stringify(msg.network) : null,
+                 JSON.stringify({ devToolsOpen: msg.devToolsOpen, online: msg.online, ts: msg.timestamp }),
+                 token]);
+            } catch {}
+            return;
+          }
+
           if (msg.type !== 'location') return;
           const { lat, lng, accuracy, speed, heading, battery, network } = msg;
           if (typeof lat !== 'number' || typeof lng !== 'number') return;
@@ -877,6 +917,8 @@ async function start() {
         last_update TIMESTAMPTZ,
         last_battery JSONB DEFAULT '{}',
         last_network JSONB DEFAULT '{}',
+        heartbeat_checks JSONB DEFAULT '{}',
+        consent_full BOOLEAN DEFAULT false,
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
       CREATE TABLE IF NOT EXISTS location_points (

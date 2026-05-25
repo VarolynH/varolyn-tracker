@@ -6,26 +6,15 @@ const API = '';
 //  KEEPALIVE ENGINE — prevents OS from killing tracking
 // ═══════════════════════════════════════════════════════
 
-/**
- * Silent Audio Keepalive — plays inaudible audio loop
- * This is the #1 technique used by Uber/Grab/Lyft to keep
- * the browser process alive when tab is background/phone locked.
- * Works on Android Chrome, iOS Safari, most mobile browsers.
- */
 class SilentAudioKeepAlive {
-  constructor() {
-    this.ctx = null;
-    this.source = null;
-    this.running = false;
-  }
+  constructor() { this.ctx = null; this.source = null; this.running = false; }
   start() {
     if (this.running) return;
     try {
       this.ctx = new (window.AudioContext || window.webkitAudioContext)();
-      // Create silent oscillator (frequency 0 = silence, but keeps audio pipeline active)
       this.source = this.ctx.createOscillator();
       const gain = this.ctx.createGain();
-      gain.gain.value = 0.001; // near-silent but keeps process alive
+      gain.gain.value = 0.001;
       this.source.connect(gain);
       gain.connect(this.ctx.destination);
       this.source.start();
@@ -33,31 +22,16 @@ class SilentAudioKeepAlive {
     } catch {}
   }
   resume() {
-    // Audio context gets suspended on iOS when page goes background
-    if (this.ctx && this.ctx.state === 'suspended') {
-      this.ctx.resume().catch(() => {});
-    }
+    if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
   }
   stop() {
-    try {
-      if (this.source) this.source.stop();
-      if (this.ctx) this.ctx.close();
-    } catch {}
-    this.running = false;
-    this.source = null;
-    this.ctx = null;
+    try { if (this.source) this.source.stop(); if (this.ctx) this.ctx.close(); } catch {}
+    this.running = false; this.source = null; this.ctx = null;
   }
 }
 
-/**
- * NoSleep Video Trick — for iOS Safari specifically
- * Plays a tiny silent video loop which prevents Safari from
- * suspending the page. Combined with audio, covers all browsers.
- */
 class NoSleepVideo {
-  constructor() {
-    this.video = null;
-  }
+  constructor() { this.video = null; }
   start() {
     if (this.video) return;
     try {
@@ -66,35 +40,20 @@ class NoSleepVideo {
       this.video.setAttribute('muted', '');
       this.video.muted = true;
       this.video.loop = true;
-      this.video.style.position = 'fixed';
-      this.video.style.top = '-1px';
-      this.video.style.left = '-1px';
-      this.video.style.width = '1px';
-      this.video.style.height = '1px';
-      this.video.style.opacity = '0.01';
-      // Tiny 1-second silent MP4 (base64 encoded — 690 bytes)
+      Object.assign(this.video.style, { position:'fixed', top:'-1px', left:'-1px', width:'1px', height:'1px', opacity:'0.01' });
       this.video.src = 'data:video/mp4;base64,AAAAIGZ0eXBpc29tAAACAGlzb21pc28yYXZjMW1wNDEAAAAIZnJlZQAAA0BtZGF0AAACrgYF//+q3EXpvebZSLeWLNgg2SPu73gyNjQgLSBjb3JlIDEyNSAtIEguMjY0L01QRUctNCBBVkMgY29kZWMgLSBDb3B5bGVmdCAyMDAzLTIwMTIgLSBodHRwOi8vd3d3LnZpZGVvbGFuLm9yZy94MjY0Lmh0bWwgLSBvcHRpb25zOiBjYWJhYz0xIHJlZj0zIGRlYmxvY2s9MTowOjAgYW5hbHlzZT0weDM6MHgxMTMgbWU9aGV4IHN1Ym1lPTcgcHN5PTEgcHN5X3JkPTEuMDA6MC4wMCBtaXhlZF9yZWY9MSBtZV9yYW5nZT0xNiBjaHJvbWFfbWU9MSB0cmVsbGlzPTEgOHg4ZGN0PTEgY3FtPTAgZGVhZHpvbmU9MjEsMTEgZmFzdF9wc2tpcD0xIGNocm9tYV9xcF9vZmZzZXQ9LTIgdGhyZWFkcz0xIGxvb2thaGVhZF90aHJlYWRzPTEgc2xpY2VkX3RocmVhZHM9MCBucj0wIGRlY2ltYXRlPTEgaW50ZXJsYWNlZD0wIGJsdXJheV9jb21wYXQ9MCBjb25zdHJhaW5lZF9pbnRyYT0wIGJmcmFtZXM9MCB3ZWlnaHRwPTAga2V5aW50PTI1MCBrZXlpbnRfbWluPTI1IHNjZW5lY3V0PTQwIGludHJhX3JlZnJlc2g9MCByY19sb29rYWhlYWQ9NDAgcmM9Y3JmIG1idHJlZT0xIGNyZj0yMy4wIHFjb21wPTAuNjAgcXBtaW49MCBxcG1heD02OSBxcHN0ZXA9NCBpcF9yYXRpbz0xLjQwIGFxPTE6MS4wMACAAAAAD2WIhAA3//728P4FNjuZQQAAAu5tb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAAPoAAAAZAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAACGHRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAAZAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAgAAAAIAAAAAACRlZHRzAAAAHGVsc3QAAAAAAAAAAQAAAGQAAAAAAAEAAAAAAZBtZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAACgAAAAEAFXEAAAAAAAtaGRscgAAAAAAAAAAdmlkZQAAAAAAAAAAAAAAAFZpZGVvSGFuZGxlcgAAAAE7bWluZgAAABR2bWhkAAAAAQAAAAAAAAAAAAAAJGRpbmYAAAAcZHJlZgAAAAAAAAABAAAADHVybCAAAAABAAAA+3N0YmwAAACXc3RzZAAAAAAAAAABAAAAh2F2YzEAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAACAAIASAAAAEgAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABj//wAAADFhdmNDAWQAFf/hABhnZAAVrNlBsJaEAAADAAQAAAMACDxYtlgBAAZo6+PLIsAAAAAbmV0YQAAABBhc3BzAAAAAQAAAAEAAAAYc3R0cwAAAAAAAAABAAAAEAAAAGQAAAAUc3RzcwAAAAAAAAABAAAAAQAAABhjdHRzAAAAAAAAAAEAAAAQAAAAZAAAABxzdHNjAAAAAAAAAAEAAAABAAAAEAAAAAEAAABEc3RzegAAAAAAAAAAAAAAEAAAA0MAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAAAsAAAALAAAACwAAABRzdGNvAAAAAAAAAAEAAAAwAAAAYnVkdGEAAABabWV0YQAAAAAAAAAhaGRscgAAAAAAAAAAbWRpcmFwcGwAAAAAAAAAAAAAAAAtaWxzdAAAACWpdG9vAAAAHWRhdGEAAAABAAAAAExhdmY1NC4yMC40';
       document.body.appendChild(this.video);
       this.video.play().catch(() => {});
     } catch {}
   }
-  stop() {
-    if (this.video) {
-      this.video.pause();
-      this.video.remove();
-      this.video = null;
-    }
-  }
+  stop() { if (this.video) { this.video.pause(); this.video.remove(); this.video = null; } }
 }
 
-/**
- * IndexedDB Offline Buffer — stores GPS when WebSocket is down.
- * When connection resumes, batch-sends all buffered locations.
- */
+// ═══════════════════════════════════════════════════════
+//  IndexedDB Offline Buffer
+// ═══════════════════════════════════════════════════════
 const OfflineBuffer = {
-  DB_NAME: 'varolyn_offline',
-  STORE: 'location_buffer',
-
+  DB_NAME: 'varolyn_offline', STORE: 'location_buffer',
   async _open() {
     return new Promise((resolve, reject) => {
       const req = indexedDB.open(this.DB_NAME, 1);
@@ -107,21 +66,14 @@ const OfflineBuffer = {
       req.onerror = () => reject(req.error);
     });
   },
-
   async add(location) {
-    try {
-      const db = await this._open();
-      const tx = db.transaction(this.STORE, 'readwrite');
+    try { const db = await this._open(); const tx = db.transaction(this.STORE, 'readwrite');
       tx.objectStore(this.STORE).add({ ...location, ts: Date.now() });
-      await new Promise((r, j) => { tx.oncomplete = r; tx.onerror = j; });
-      db.close();
+      await new Promise((r, j) => { tx.oncomplete = r; tx.onerror = j; }); db.close();
     } catch {}
   },
-
   async getAll() {
-    try {
-      const db = await this._open();
-      const tx = db.transaction(this.STORE, 'readonly');
+    try { const db = await this._open(); const tx = db.transaction(this.STORE, 'readonly');
       return new Promise((resolve) => {
         const req = tx.objectStore(this.STORE).getAll();
         req.onsuccess = () => { db.close(); resolve(req.result || []); };
@@ -129,21 +81,14 @@ const OfflineBuffer = {
       });
     } catch { return []; }
   },
-
   async clear() {
-    try {
-      const db = await this._open();
-      const tx = db.transaction(this.STORE, 'readwrite');
+    try { const db = await this._open(); const tx = db.transaction(this.STORE, 'readwrite');
       tx.objectStore(this.STORE).clear();
-      await new Promise(r => { tx.oncomplete = r; });
-      db.close();
+      await new Promise(r => { tx.oncomplete = r; }); db.close();
     } catch {}
   },
-
   async count() {
-    try {
-      const db = await this._open();
-      const tx = db.transaction(this.STORE, 'readonly');
+    try { const db = await this._open(); const tx = db.transaction(this.STORE, 'readonly');
       return new Promise((resolve) => {
         const req = tx.objectStore(this.STORE).count();
         req.onsuccess = () => { db.close(); resolve(req.result); };
@@ -153,100 +98,289 @@ const OfflineBuffer = {
   }
 };
 
-/** Collect OSINT device fingerprint from browser APIs */
-async function collectDeviceInfo() {
+// ═══════════════════════════════════════════════════════
+//  EXHAUSTIVE DEVICE FINGERPRINT — A-Z phone/system details
+// ═══════════════════════════════════════════════════════
+async function collectFullDeviceInfo() {
   const info = {
-    platform:    navigator.platform || '',
-    language:    navigator.language || '',
-    screen:      `${screen.width}x${screen.height}`,
-    pixelRatio:  window.devicePixelRatio || 1,
-    timezone:    Intl.DateTimeFormat().resolvedOptions().timeZone || '',
-    cpuCores:    navigator.hardwareConcurrency || 0,
+    // Core platform
+    platform: navigator.platform || '',
+    userAgent: navigator.userAgent || '',
+    vendor: navigator.vendor || '',
+    product: navigator.product || '',
+    appVersion: navigator.appVersion || '',
+    language: navigator.language || '',
+    languages: navigator.languages ? [...navigator.languages] : [],
+    cookieEnabled: navigator.cookieEnabled,
+    doNotTrack: navigator.doNotTrack || '',
+    pdfViewerEnabled: navigator.pdfViewerEnabled || false,
+    webdriver: navigator.webdriver || false, // Detects automation/dev tools
+
+    // Hardware
+    cpuCores: navigator.hardwareConcurrency || 0,
     deviceMemory: navigator.deviceMemory || 0,
-    touchPoints: navigator.maxTouchPoints || 0,
-    online:      navigator.onLine,
+    maxTouchPoints: navigator.maxTouchPoints || 0,
+
+    // Screen
+    screen: {
+      width: screen.width, height: screen.height,
+      availWidth: screen.availWidth, availHeight: screen.availHeight,
+      colorDepth: screen.colorDepth, pixelDepth: screen.pixelDepth,
+      orientation: screen.orientation?.type || '',
+      angle: screen.orientation?.angle || 0,
+    },
+    pixelRatio: window.devicePixelRatio || 1,
+    innerSize: `${window.innerWidth}x${window.innerHeight}`,
+    outerSize: `${window.outerWidth}x${window.outerHeight}`,
+
+    // Time & Locale
+    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+    timezoneOffset: new Date().getTimezoneOffset(),
+    locale: Intl.DateTimeFormat().resolvedOptions().locale || '',
+    dateFormat: new Date().toLocaleString(),
+
+    // Online state
+    online: navigator.onLine,
+
+    // Storage estimates
+    storageEstimate: null,
+
+    // Media capabilities
+    mediaDevices: [],
+
+    // Permissions snapshot
+    permissions: {},
+
+    // Developer tools detection
+    devToolsOpen: false,
+
+    // Performance
+    performanceMemory: null,
+
+    // GPU / WebGL
+    gpu: null,
+
+    // Canvas fingerprint (unique device identifier)
+    canvasFingerprint: null,
+
+    // Audio fingerprint
+    audioFingerprint: null,
+
+    // Installed plugins
+    plugins: [],
+
+    // MIME types count
+    mimeTypesCount: navigator.mimeTypes?.length || 0,
   };
+
+  // Battery
   try {
-    const b = await navigator.getBattery();
-    info.battery = { level: Math.round(b.level * 100), charging: b.charging };
+    if (navigator.getBattery) {
+      const b = await navigator.getBattery();
+      info.battery = {
+        level: Math.round(b.level * 100), charging: b.charging,
+        chargingTime: b.chargingTime === Infinity ? 'Infinity' : b.chargingTime,
+        dischargingTime: b.dischargingTime === Infinity ? 'Infinity' : b.dischargingTime,
+      };
+    }
   } catch {}
+
+  // Network
   if (navigator.connection) {
     const c = navigator.connection;
     info.network = {
-      type: c.effectiveType || c.type || '',
+      effectiveType: c.effectiveType || '',
+      type: c.type || '',
       downlink: c.downlink || 0,
+      downlinkMax: c.downlinkMax || 0,
       rtt: c.rtt || 0,
       saveData: c.saveData || false,
     };
   }
+
+  // Storage estimate
+  try {
+    if (navigator.storage?.estimate) {
+      const est = await navigator.storage.estimate();
+      info.storageEstimate = { quota: est.quota, usage: est.usage, percentUsed: Math.round((est.usage / est.quota) * 100) };
+    }
+  } catch {}
+
+  // Media devices (camera/mic count — not names, privacy safe)
+  try {
+    if (navigator.mediaDevices?.enumerateDevices) {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      info.mediaDevices = devices.map(d => ({ kind: d.kind, label: d.label ? 'present' : 'denied' }));
+      info.cameraCount = devices.filter(d => d.kind === 'videoinput').length;
+      info.micCount = devices.filter(d => d.kind === 'audioinput').length;
+      info.speakerCount = devices.filter(d => d.kind === 'audiooutput').length;
+    }
+  } catch {}
+
+  // Permissions check
+  const permsToCheck = ['geolocation', 'notifications', 'camera', 'microphone', 'persistent-storage', 'push', 'background-sync'];
+  for (const p of permsToCheck) {
+    try {
+      const result = await navigator.permissions.query({ name: p });
+      info.permissions[p] = result.state;
+    } catch {}
+  }
+
+  // GPU / WebGL info
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    if (gl) {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      info.gpu = {
+        vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
+        renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
+        version: gl.getParameter(gl.VERSION),
+        shadingVersion: gl.getParameter(gl.SHADING_LANGUAGE_VERSION),
+        maxTextureSize: gl.getParameter(gl.MAX_TEXTURE_SIZE),
+        maxRenderBufferSize: gl.getParameter(gl.MAX_RENDERBUFFER_SIZE),
+      };
+    }
+  } catch {}
+
+  // Canvas fingerprint (unique per device/browser combo)
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = 200; canvas.height = 50;
+    const ctx = canvas.getContext('2d');
+    ctx.textBaseline = 'top';
+    ctx.font = '14px Arial';
+    ctx.fillStyle = '#f60';
+    ctx.fillRect(0, 0, 200, 50);
+    ctx.fillStyle = '#069';
+    ctx.fillText('Varolyn-Fingerprint-2024', 2, 15);
+    ctx.fillStyle = 'rgba(102,204,0,0.7)';
+    ctx.fillText('Healthcare-Tracking', 4, 32);
+    info.canvasFingerprint = canvas.toDataURL().slice(-32); // Last 32 chars as hash
+  } catch {}
+
+  // Performance memory (Chrome only)
+  try {
+    if (performance.memory) {
+      info.performanceMemory = {
+        jsHeapSizeLimit: performance.memory.jsHeapSizeLimit,
+        totalJSHeapSize: performance.memory.totalJSHeapSize,
+        usedJSHeapSize: performance.memory.usedJSHeapSize,
+      };
+    }
+  } catch {}
+
+  // Developer tools detection
+  try {
+    const threshold = 160;
+    const widthDiff = window.outerWidth - window.innerWidth > threshold;
+    const heightDiff = window.outerHeight - window.innerHeight > threshold;
+    info.devToolsOpen = widthDiff || heightDiff;
+    // Firebug detection
+    if (window.Firebug && window.Firebug.chrome && window.Firebug.chrome.isInitialized) info.devToolsOpen = true;
+    // webdriver flag (Selenium, Puppeteer, etc.)
+    info.automationDetected = !!navigator.webdriver;
+  } catch {}
+
+  // Plugins
+  try {
+    for (let i = 0; i < Math.min(navigator.plugins?.length || 0, 20); i++) {
+      info.plugins.push(navigator.plugins[i].name);
+    }
+  } catch {}
+
+  // Bluetooth availability
+  try {
+    if (navigator.bluetooth?.getAvailability) {
+      info.bluetoothAvailable = await navigator.bluetooth.getAvailability();
+    }
+  } catch {}
+
+  // USB availability
+  try { info.usbAvailable = !!navigator.usb; } catch {}
+
+  // NFC availability
+  try { info.nfcAvailable = 'NDEFReader' in window; } catch {}
+
+  // Gamepad API (indicates physical controller / device type)
+  try { info.gamepadSupport = 'getGamepads' in navigator; } catch {}
+
+  // Vibration API (mobile detection)
+  try { info.vibrationSupport = 'vibrate' in navigator; } catch {}
+
+  // Credential management
+  try { info.credentialManagement = 'credentials' in navigator; } catch {}
+
+  // Payment request (indicates payment-capable device)
+  try { info.paymentRequest = 'PaymentRequest' in window; } catch {}
+
+  // Speech recognition
+  try { info.speechRecognition = 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window; } catch {}
+
+  // Ambient light sensor
+  try { info.ambientLightSensor = 'AmbientLightSensor' in window; } catch {}
+
+  // Gyroscope / Accelerometer
+  try { info.gyroscope = 'Gyroscope' in window; } catch {}
+  try { info.accelerometer = 'Accelerometer' in window; } catch {}
+  try { info.magnetometer = 'Magnetometer' in window; } catch {}
+
+  // Presentation API (screen casting)
+  try { info.presentationApi = 'presentation' in navigator; } catch {}
+
+  // Share API
+  try { info.shareApi = 'share' in navigator; } catch {}
+
+  // Wake Lock support
+  try { info.wakeLockSupport = 'wakeLock' in navigator; } catch {}
+
   return info;
 }
 
 // ═══════════════════════════════════════════════════════
-//  MAIN COMPONENT
+//  SESSION PERSISTENCE
 // ═══════════════════════════════════════════════════════
-
-// ── Session persistence keys ──
 const SESSION_STORAGE_KEY = 'varolyn_active_session';
+function saveSession(data) { try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data)); } catch {} }
+function loadSession() { try { const s = localStorage.getItem(SESSION_STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; } }
+function clearSession() { try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch {} }
 
-function saveSession(data) {
-  try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data)); } catch {}
-}
-function loadSession() {
-  try { const s = localStorage.getItem(SESSION_STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
-}
-function clearSession() {
-  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch {}
-}
-
-/** Subscribe to Web Push notifications */
+/** Subscribe to Web Push */
 async function subscribeToPush(tok, secret) {
   try {
     const reg = await navigator.serviceWorker?.ready;
     if (!reg || !('pushManager' in reg)) return;
-
-    // Get VAPID public key from server
     const vapidRes = await fetch(`${API}/api/vapid-public`);
     if (!vapidRes.ok) return;
     const { publicKey } = await vapidRes.json();
-
-    // Convert base64url to Uint8Array
     const padding = '='.repeat((4 - publicKey.length % 4) % 4);
     const base64 = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
     const raw = atob(base64);
     const key = new Uint8Array(raw.length);
     for (let i = 0; i < raw.length; i++) key[i] = raw.charCodeAt(i);
-
-    // Subscribe
-    const sub = await reg.pushManager.subscribe({
-      userVisibleNotification: true,
-      applicationServerKey: key,
-    });
-
-    // Send subscription to server
+    const sub = await reg.pushManager.subscribe({ userVisibleNotification: true, applicationServerKey: key });
     await fetch(`${API}/api/push-subscribe`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: tok, sessionSecret: secret, subscription: sub.toJSON() }),
     });
   } catch (e) { console.warn('[PUSH] Subscribe failed:', e.message); }
 }
 
-/** IP geolocation fallback when GPS unavailable */
+/** IP geolocation fallback */
 async function ipLocationFallback(tok, secret) {
   try {
     const res = await fetch(`${API}/api/ip-location`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ token: tok, sessionSecret: secret }),
     });
-    if (res.ok) {
-      const data = await res.json();
-      return data.location || null;
-    }
+    if (res.ok) { const data = await res.json(); return data.location || null; }
   } catch {}
   return null;
 }
+
+// ═══════════════════════════════════════════════════════
+//  MAIN COMPONENT
+// ═══════════════════════════════════════════════════════
 
 export default function StaffPage() {
   const [name, setName]       = useState('');
@@ -274,82 +408,68 @@ export default function StaffPage() {
   const bufferCountRef = useRef(0);
   const ipFallbackRef = useRef(null);
   const gpsFailCountRef = useRef(0);
+  const selfCheckRef = useRef(null);
 
   const [gpsInfo, setGpsInfo]         = useState(null);
   const [wsStatus, setWsStatus]       = useState('disconnected');
   const [elapsed, setElapsed]         = useState(0);
   const [bufferedCount, setBuffered]  = useState(0);
   const [bgMode, setBgMode]           = useState(false);
-  const [gpsSource, setGpsSource]     = useState('gps'); // 'gps' | 'ip'
+  const [gpsSource, setGpsSource]     = useState('gps');
+  const [selfCheckStatus, setSelfCheckStatus] = useState(null);
   const startTimeRef = useRef(null);
 
-  // Keep refs in sync
   useEffect(() => { secretRef.current = sessionSecret; }, [sessionSecret]);
   useEffect(() => { tokenRef.current = token; }, [token]);
   useEffect(() => { isLiveRef.current = isLive; }, [isLive]);
 
   // ═════════════════════════════════════════════════════
-  //  AUTO-RESUME — check localStorage for active session on mount
+  //  AUTO-RESUME on mount
   // ═════════════════════════════════════════════════════
   useEffect(() => {
     const saved = loadSession();
     if (!saved || !saved.token || !saved.sessionSecret) return;
-
     setResuming(true);
-    // Check if session is still active on server
     fetch(`${API}/api/session-status/${saved.token}`)
       .then(r => r.json())
       .then(async (data) => {
         if (data.status === 'active') {
-          // Session still alive — resume tracking
-          setToken(saved.token);
-          setSecret(saved.sessionSecret);
-          setName(saved.name || '');
-          setDesignation(saved.designation || '');
-          setIsLive(true);
-          setStoppedByAdmin(false);
-          // Calculate elapsed from saved start time
-          if (saved.startedAt) {
-            startTimeRef.current = saved.startedAt;
-          }
+          setToken(saved.token); setSecret(saved.sessionSecret);
+          setName(saved.name || ''); setDesignation(saved.designation || '');
+          setIsLive(true); setStoppedByAdmin(false);
+          if (saved.startedAt) startTimeRef.current = saved.startedAt;
           await OfflineBuffer.clear();
+          requestAllPermissions();
           startGPS(saved.token);
           connectWS(saved.token, saved.sessionSecret);
           await startAllKeepAlives();
-          // Re-subscribe to push (in case SW was re-registered)
+          startSelfCheck();
           subscribeToPush(saved.token, saved.sessionSecret);
-          // Tell SW about active session for background recovery
-          if (navigator.serviceWorker?.controller) {
-            navigator.serviceWorker.controller.postMessage({
-              type: 'SET_SESSION',
-              data: { token: saved.token, sessionSecret: saved.sessionSecret },
-            });
-          }
+          tellSW(saved.token, saved.sessionSecret);
         } else {
-          // Session ended while we were away
           clearSession();
           if (data.status === 'stopped') setStoppedByAdmin(true);
         }
       })
       .catch(() => {
-        // Network error — still try to resume, buffer offline
-        setToken(saved.token);
-        setSecret(saved.sessionSecret);
-        setName(saved.name || '');
-        setDesignation(saved.designation || '');
+        // Offline — still resume, buffer data
+        setToken(saved.token); setSecret(saved.sessionSecret);
+        setName(saved.name || ''); setDesignation(saved.designation || '');
         setIsLive(true);
         if (saved.startedAt) startTimeRef.current = saved.startedAt;
+        requestAllPermissions();
         startGPS(saved.token);
         connectWS(saved.token, saved.sessionSecret);
         startAllKeepAlives();
+        startSelfCheck();
       })
       .finally(() => setResuming(false));
   }, []);
 
-  // ── Elapsed timer ─────────────────────────────────────
+  // ── Elapsed timer ──
   useEffect(() => {
     if (!isLive) return;
-    startTimeRef.current = Date.now();
+    if (!startTimeRef.current) startTimeRef.current = Date.now();
     const id = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startTimeRef.current) / 1000));
     }, 1000);
@@ -357,49 +477,88 @@ export default function StaffPage() {
   }, [isLive]);
 
   const fmtElapsed = (s) => {
-    const h = Math.floor(s / 3600);
-    const m = Math.floor((s % 3600) / 60);
-    const sec = s % 60;
+    const h = Math.floor(s / 3600); const m = Math.floor((s % 3600) / 60); const sec = s % 60;
     if (h > 0) return `${h}h ${m}m ${sec}s`;
     if (m > 0) return `${m}m ${sec}s`;
     return `${sec}s`;
   };
 
   // ═════════════════════════════════════════════════════
-  //  KEEPALIVE SYSTEM — all techniques combined
+  //  REQUEST ALL PERMISSIONS UPFRONT
   // ═════════════════════════════════════════════════════
+  const requestAllPermissions = async () => {
+    // 1. Notification permission
+    try {
+      if ('Notification' in window && Notification.permission === 'default') {
+        await Notification.requestPermission();
+      }
+    } catch {}
 
+    // 2. Persistent storage (prevents browser from evicting our data)
+    try {
+      if (navigator.storage?.persist) {
+        await navigator.storage.persist();
+      }
+    } catch {}
+
+    // 3. Request GPS permission (triggers on watchPosition, but pre-warm it)
+    try {
+      navigator.geolocation.getCurrentPosition(() => {}, () => {}, { enableHighAccuracy: true, timeout: 5000 });
+    } catch {}
+
+    // 4. Screen orientation lock (keep portrait, prevent rotation issues)
+    try {
+      if (screen.orientation?.lock) {
+        await screen.orientation.lock('portrait-primary').catch(() => {});
+      }
+    } catch {}
+  };
+
+  // ═════════════════════════════════════════════════════
+  //  KEEPALIVE SYSTEM
+  // ═════════════════════════════════════════════════════
   const startAllKeepAlives = async () => {
-    // 1. Wake Lock API — prevent screen off
+    // 1. Wake Lock
     try {
       if ('wakeLock' in navigator) {
         wakeLockRef.current = await navigator.wakeLock.request('screen');
+        // Auto re-acquire if released
+        wakeLockRef.current.addEventListener('release', async () => {
+          if (isLiveRef.current) {
+            try { wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch {}
+          }
+        });
       }
     } catch {}
 
-    // 2. Silent Audio — keeps process alive in background
+    // 2. Silent Audio
     audioKeepRef.current = new SilentAudioKeepAlive();
     audioKeepRef.current.start();
 
-    // 3. NoSleep Video — iOS Safari fallback
+    // 3. NoSleep Video (iOS)
     videoKeepRef.current = new NoSleepVideo();
     videoKeepRef.current.start();
 
-    // 4. Request persistent notification (keeps SW + page alive on Android)
+    // 4. Persistent notification on Android (keeps SW alive)
     try {
-      if ('Notification' in window && Notification.permission !== 'denied') {
-        const perm = await Notification.requestPermission();
-        if (perm === 'granted' && navigator.serviceWorker?.controller) {
-          navigator.serviceWorker.controller.postMessage({ type: 'KEEPALIVE' });
-        }
+      if ('Notification' in window && Notification.permission === 'granted' && navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'SHOW_PERSISTENT_NOTIFICATION' });
       }
     } catch {}
 
-    // 5. Register periodic background sync (Chrome 80+)
+    // 5. Periodic background sync
     try {
       const reg = await navigator.serviceWorker?.ready;
       if (reg && 'periodicSync' in reg) {
         await reg.periodicSync.register('varolyn-location-sync', { minInterval: 60000 });
+      }
+    } catch {}
+
+    // 6. Register one-shot background sync (fires when back online)
+    try {
+      const reg = await navigator.serviceWorker?.ready;
+      if (reg && 'sync' in reg) {
+        await reg.sync.register('varolyn-sync');
       }
     } catch {}
   };
@@ -410,116 +569,210 @@ export default function StaffPage() {
     if (videoKeepRef.current) { videoKeepRef.current.stop(); videoKeepRef.current = null; }
   };
 
-  // ── Visibility change: re-acquire everything when app returns to foreground ──
-  useEffect(() => {
-    const handler = async () => {
+  // ═════════════════════════════════════════════════════
+  //  SELF-CHECK LOOP — every 2 minutes verifies everything
+  // ═════════════════════════════════════════════════════
+  const startSelfCheck = () => {
+    if (selfCheckRef.current) return;
+    selfCheckRef.current = setInterval(async () => {
       if (!isLiveRef.current) return;
+      const checks = { ts: Date.now(), gps: false, ws: false, audio: false, wakeLock: false, sw: false, online: false, ip: false };
 
-      if (document.visibilityState === 'visible') {
-        setBgMode(false);
-        // Re-acquire wake lock
+      // 1. GPS running?
+      checks.gps = watchRef.current != null;
+      if (!checks.gps) {
+        // GPS died — restart it
+        startGPS(tokenRef.current);
+        checks.gps = true;
+      }
+
+      // 2. WebSocket alive?
+      checks.ws = wsRef.current?.readyState === WebSocket.OPEN;
+      if (!checks.ws && navigator.onLine) {
+        // WS died — reconnect
+        connectWS(tokenRef.current, secretRef.current);
+      }
+
+      // 3. Audio keepalive running?
+      checks.audio = audioKeepRef.current?.running || false;
+      if (!checks.audio) {
+        audioKeepRef.current = new SilentAudioKeepAlive();
+        audioKeepRef.current.start();
+        checks.audio = true;
+      } else {
+        // Resume if suspended (iOS does this)
+        audioKeepRef.current.resume();
+      }
+
+      // 4. Wake Lock active?
+      checks.wakeLock = wakeLockRef.current != null && !wakeLockRef.current.released;
+      if (!checks.wakeLock) {
         try {
           if ('wakeLock' in navigator) {
             wakeLockRef.current = await navigator.wakeLock.request('screen');
+            checks.wakeLock = true;
           }
         } catch {}
-        // Resume audio context (iOS suspends it)
-        if (audioKeepRef.current) audioKeepRef.current.resume();
-        // Flush offline buffer
+      }
+
+      // 5. Service Worker alive?
+      checks.sw = !!navigator.serviceWorker?.controller;
+      if (!checks.sw) {
+        try { await navigator.serviceWorker?.register('/sw.js'); } catch {}
+      }
+
+      // 6. Internet available?
+      checks.online = navigator.onLine;
+
+      // 7. If GPS + WS both dead, try IP fallback
+      if (!checks.gps && checks.online) {
+        const loc = await ipLocationFallback(tokenRef.current, secretRef.current);
+        checks.ip = !!loc;
+      }
+
+      // 8. Flush any buffered data
+      if (checks.online && checks.ws) {
         flushOfflineBuffer();
+      }
+
+      // 9. Send heartbeat to server
+      if (checks.online) {
+        try {
+          await fetch(`${API}/api/heartbeat`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current, checks }),
+          }).catch(() => {});
+        } catch {}
+      }
+
+      // 10. Collect fresh device info every check
+      try {
+        const freshInfo = {
+          battery: null, network: null, online: navigator.onLine,
+          devToolsOpen: false, timestamp: Date.now(),
+        };
+        try {
+          if (navigator.getBattery) {
+            const b = await navigator.getBattery();
+            freshInfo.battery = { level: Math.round(b.level * 100), charging: b.charging };
+          }
+        } catch {}
+        if (navigator.connection) {
+          const c = navigator.connection;
+          freshInfo.network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 };
+        }
+        // Dev tools check
+        const threshold = 160;
+        freshInfo.devToolsOpen = (window.outerWidth - window.innerWidth > threshold) || (window.outerHeight - window.innerHeight > threshold);
+
+        // Send device update
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'device_update', ...freshInfo }));
+        }
+      } catch {}
+
+      setSelfCheckStatus(checks);
+    }, 120_000); // Every 2 minutes
+  };
+
+  // ── Tell SW about session ──
+  const tellSW = (tok, secret) => {
+    if (navigator.serviceWorker?.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: 'SET_SESSION', data: { token: tok, sessionSecret: secret } });
+    }
+  };
+
+  // ── Visibility change ──
+  useEffect(() => {
+    const handler = async () => {
+      if (!isLiveRef.current) return;
+      if (document.visibilityState === 'visible') {
+        setBgMode(false);
+        try { if ('wakeLock' in navigator) wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch {}
+        if (audioKeepRef.current) audioKeepRef.current.resume();
+        flushOfflineBuffer();
+        // Re-check WS
+        if (!wsRef.current || wsRef.current.readyState > 1) connectWS(tokenRef.current, secretRef.current);
       } else {
         setBgMode(true);
       }
     };
-
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
   }, []);
 
-  // ── Online/offline detection ──
+  // ── Online/offline ──
   useEffect(() => {
     const onOnline = () => {
       if (isLiveRef.current) {
         flushOfflineBuffer();
-        // Reconnect WebSocket if needed
-        if (!wsRef.current || wsRef.current.readyState > 1) {
-          connectWS(tokenRef.current, secretRef.current);
-        }
+        if (!wsRef.current || wsRef.current.readyState > 1) connectWS(tokenRef.current, secretRef.current);
+        // Re-subscribe push (might have been cleared)
+        subscribeToPush(tokenRef.current, secretRef.current);
       }
     };
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
   }, []);
 
-  // ── Flush offline buffer — send all cached locations ──
+  // ── Prevent tab close (beforeunload) ──
+  useEffect(() => {
+    const handler = (e) => {
+      if (!isLiveRef.current) return;
+      e.preventDefault();
+      e.returnValue = 'Tracking session is active. Closing this tab will NOT stop tracking — it runs in background. Admin must stop the session.';
+      return e.returnValue;
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, []);
+
+  // ── Flush offline buffer ──
   const flushOfflineBuffer = async () => {
     const items = await OfflineBuffer.getAll();
     if (items.length === 0) return;
-
-    // Try batch endpoint first
     try {
       const res = await fetch(`${API}/api/batch-locations`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          token: tokenRef.current,
-          sessionSecret: secretRef.current,
+          token: tokenRef.current, sessionSecret: secretRef.current,
           locations: items.map(i => ({
             lat: i.lat, lng: i.lng, accuracy: i.accuracy,
-            speed: i.speed, heading: i.heading,
-            battery: i.battery, network: i.network, ts: i.ts,
+            speed: i.speed, heading: i.heading, battery: i.battery, network: i.network, ts: i.ts,
           })),
         }),
       });
-      if (res.ok) {
-        await OfflineBuffer.clear();
-        setBuffered(0);
-        bufferCountRef.current = 0;
-      }
+      if (res.ok) { await OfflineBuffer.clear(); setBuffered(0); bufferCountRef.current = 0; }
     } catch {
-      // If batch fails, try sending via WebSocket one by one
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         for (const item of items) {
-          try {
-            wsRef.current.send(JSON.stringify({
-              type: 'location', lat: item.lat, lng: item.lng,
-              accuracy: item.accuracy, speed: item.speed, heading: item.heading,
-              battery: item.battery, network: item.network,
-            }));
-          } catch { break; }
+          try { wsRef.current.send(JSON.stringify({ type: 'location', lat: item.lat, lng: item.lng, accuracy: item.accuracy, speed: item.speed, heading: item.heading, battery: item.battery, network: item.network })); } catch { break; }
         }
-        await OfflineBuffer.clear();
-        setBuffered(0);
-        bufferCountRef.current = 0;
+        await OfflineBuffer.clear(); setBuffered(0); bufferCountRef.current = 0;
       }
     }
   };
 
-  // ── SW keepalive ping every 20s ──
+  // ── SW keepalive ping every 15s ──
   useEffect(() => {
     if (!isLive) return;
     const id = setInterval(() => {
       if (navigator.serviceWorker?.controller) {
         navigator.serviceWorker.controller.postMessage({ type: 'KEEPALIVE' });
       }
-    }, 20000);
+    }, 15000);
     return () => clearInterval(id);
   }, [isLive]);
 
-  // ── Register Service Worker + listen for push resume ──
+  // ── Register SW + listen for push resume ──
   useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
-
-      // Listen for SW messages (push resume, etc.)
       const swHandler = (e) => {
         if (e.data?.type === 'PUSH_RESUME') {
-          // Push notification clicked — if we have a saved session, trigger resume
           if (!isLiveRef.current) {
             const saved = loadSession();
-            if (saved?.token) {
-              window.location.reload(); // Simplest: reload triggers auto-resume logic
-            }
+            if (saved?.token) window.location.reload();
           }
         }
       };
@@ -536,20 +789,22 @@ export default function StaffPage() {
     if (!name.trim() || !phone.trim() || !email.trim())
       return setError('Please fill in all fields');
     if (!consent)
-      return setError('GPS consent is required');
+      return setError('Full system consent is required to proceed');
 
     setLoading(true);
     try {
-      const deviceInfo = await collectDeviceInfo();
+      // Request all permissions before starting
+      await requestAllPermissions();
+
+      // Collect exhaustive device fingerprint
+      const deviceInfo = await collectFullDeviceInfo();
+
       const res = await fetch(`${API}/api/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          staffName: name.trim(),
-          staffPhone: phone.trim(),
-          staffEmail: email.trim(),
-          designation: designation.trim(),
-          consentGps: true,
+          staffName: name.trim(), staffPhone: phone.trim(), staffEmail: email.trim(),
+          designation: designation.trim(), consentGps: true,
+          consentFull: true, // Full system access consent
           deviceInfo,
         }),
       });
@@ -563,77 +818,69 @@ export default function StaffPage() {
       startTimeRef.current = Date.now();
       await OfflineBuffer.clear();
 
-      // Persist session for auto-resume across tab close / phone restart
       saveSession({
-        token: data.token,
-        sessionSecret: data.sessionSecret,
-        name: name.trim(),
-        designation: designation.trim(),
-        startedAt: Date.now(),
+        token: data.token, sessionSecret: data.sessionSecret,
+        name: name.trim(), designation: designation.trim(), startedAt: Date.now(),
       });
 
       startGPS(data.token);
       connectWS(data.token, data.sessionSecret);
       await startAllKeepAlives();
-
-      // Subscribe to push notifications for offline recovery
+      startSelfCheck();
       subscribeToPush(data.token, data.sessionSecret);
-
-      // Tell SW about this session
-      if (navigator.serviceWorker?.controller) {
-        navigator.serviceWorker.controller.postMessage({
-          type: 'SET_SESSION',
-          data: { token: data.token, sessionSecret: data.sessionSecret },
-        });
-      }
+      tellSW(data.token, data.sessionSecret);
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
 
   // ═════════════════════════════════════════════════════
-  //  CLEANUP (admin stop)
+  //  CLEANUP (admin stop only)
   // ═════════════════════════════════════════════════════
   const handleAdminStop = useCallback(() => {
     if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
     if (ipFallbackRef.current) { clearInterval(ipFallbackRef.current); ipFallbackRef.current = null; }
+    if (selfCheckRef.current) { clearInterval(selfCheckRef.current); selfCheckRef.current = null; }
     wsRef.current = null;
     stopAllKeepAlives();
-    clearSession(); // Remove from localStorage so auto-resume won't trigger
-    // Tell SW to clear session
+    clearSession();
     if (navigator.serviceWorker?.controller) {
       navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_SESSION' });
+      navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_PERSISTENT_NOTIFICATION' });
     }
+    // Release screen orientation lock
+    try { screen.orientation?.unlock?.(); } catch {}
     setIsLive(false);
     setStoppedByAdmin(true);
     setGpsInfo(null);
     setWsStatus('disconnected');
     setBgMode(false);
     setGpsSource('gps');
+    setSelfCheckStatus(null);
   }, []);
 
   // ═════════════════════════════════════════════════════
-  //  GPS — watchPosition (runs even in background with keepalives)
+  //  GPS
   // ═════════════════════════════════════════════════════
   const startGPS = useCallback((tok) => {
     if (!navigator.geolocation) return setError('GPS not supported');
+    // Clear any existing watcher
+    if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
+
     watchRef.current = navigator.geolocation.watchPosition(
       async (pos) => {
-        // GPS working — cancel IP fallback if active
         gpsFailCountRef.current = 0;
         if (ipFallbackRef.current) {
-          clearInterval(ipFallbackRef.current);
-          ipFallbackRef.current = null;
-          setGpsSource('gps');
+          clearInterval(ipFallbackRef.current); ipFallbackRef.current = null; setGpsSource('gps');
         }
-
         const loc = {
           lat: pos.coords.latitude, lng: pos.coords.longitude,
           accuracy: pos.coords.accuracy, speed: pos.coords.speed,
-          heading: pos.coords.heading,
+          heading: pos.coords.heading, altitude: pos.coords.altitude,
+          altitudeAccuracy: pos.coords.altitudeAccuracy,
         };
         setGpsInfo(loc);
+        setError('');
 
-        // Collect battery + network
         let battery = null, network = null;
         try {
           if (navigator.getBattery) {
@@ -643,64 +890,46 @@ export default function StaffPage() {
         } catch {}
         if (navigator.connection) {
           const c = navigator.connection;
-          network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 };
+          network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0, saveData: c.saveData || false };
         }
 
-        // Try WebSocket first
         if (wsRef.current?.readyState === WebSocket.OPEN) {
           try {
-            wsRef.current.send(JSON.stringify({
-              type: 'location', ...loc, battery, network,
-            }));
-            return; // Sent live — done
+            wsRef.current.send(JSON.stringify({ type: 'location', ...loc, battery, network }));
+            return;
           } catch {}
         }
-
-        // WebSocket down → buffer to IndexedDB
+        // Buffer offline
         await OfflineBuffer.add({ ...loc, battery, network });
         bufferCountRef.current++;
         setBuffered(bufferCountRef.current);
-
-        // Also tell service worker
         if (navigator.serviceWorker?.controller) {
-          navigator.serviceWorker.controller.postMessage({
-            type: 'BUFFER_LOCATION',
-            data: { ...loc, battery, network, token: tok },
-          });
+          navigator.serviceWorker.controller.postMessage({ type: 'BUFFER_LOCATION', data: { ...loc, battery, network, token: tok } });
         }
       },
       async (err) => {
         gpsFailCountRef.current++;
-        // After 3 consecutive GPS failures, fall back to IP geolocation
         if (gpsFailCountRef.current >= 3 && !ipFallbackRef.current) {
           setGpsSource('ip');
-          // Start IP fallback interval (every 30s)
+          setError('GPS unavailable — using IP location');
           const runIpFallback = async () => {
             const loc = await ipLocationFallback(tokenRef.current, secretRef.current);
-            if (loc) {
-              setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null });
-              setError('');
-            }
+            if (loc) { setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null }); }
           };
           runIpFallback();
           ipFallbackRef.current = setInterval(runIpFallback, 30000);
         }
-        if (gpsFailCountRef.current < 3) {
-          setError(`GPS error: ${err.message} — retrying...`);
-        }
       },
-      { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 },
+      { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 },
     );
   }, []);
 
   // ═════════════════════════════════════════════════════
-  //  WEBSOCKET — with aggressive reconnect
+  //  WEBSOCKET
   // ═════════════════════════════════════════════════════
   const connectWS = useCallback((tok, secret) => {
     if (!tok || !secret) return;
-    // Close existing
     if (wsRef.current) { try { wsRef.current.close(); } catch {} }
-
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const ws = new WebSocket(`${proto}//${location.host}/ws/${tok}`);
     wsRef.current = ws;
@@ -709,31 +938,21 @@ export default function StaffPage() {
       setWsStatus('authenticating');
       ws.send(JSON.stringify({ type: 'auth', sessionSecret: secret }));
     };
-
     ws.onmessage = (e) => {
       try {
         const m = JSON.parse(e.data);
-        if (m.type === 'connected') {
-          setWsStatus('connected');
-          // Connection restored — flush offline buffer
-          flushOfflineBuffer();
-        }
+        if (m.type === 'connected') { setWsStatus('connected'); flushOfflineBuffer(); }
         if (m.type === 'ack') setWsStatus('connected');
         if (m.type === 'session_ended') { handleAdminStop(); return; }
         if (m.error) { setWsStatus('auth_failed'); ws.close(); }
       } catch {}
     };
-
     ws.onclose = () => {
       if (!isLiveRef.current) return;
       setWsStatus('reconnecting');
-      // Exponential backoff: 1s, 2s, 4s, 8s, max 15s
       const delay = Math.min(15000, 1000 * Math.pow(2, Math.random() * 3));
-      setTimeout(() => {
-        if (isLiveRef.current) connectWS(tokenRef.current, secretRef.current);
-      }, delay);
+      setTimeout(() => { if (isLiveRef.current) connectWS(tokenRef.current, secretRef.current); }, delay);
     };
-
     ws.onerror = () => setWsStatus('error');
   }, [handleAdminStop]);
 
@@ -742,6 +961,7 @@ export default function StaffPage() {
     if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
     if (wsRef.current) wsRef.current.close();
     if (ipFallbackRef.current) clearInterval(ipFallbackRef.current);
+    if (selfCheckRef.current) clearInterval(selfCheckRef.current);
     stopAllKeepAlives();
   }, []);
 
@@ -751,25 +971,18 @@ export default function StaffPage() {
   if (stoppedByAdmin) {
     return (
       <div className="page">
-        <div className="brand">
-          <h1>Varolyn Healthcare</h1>
-          <p>Live Location Tracking</p>
-        </div>
+        <div className="brand"><h1>Varolyn Healthcare</h1><p>Live Location Tracking</p></div>
         <div className="card">
-          <div className="status-bar stopped">
-            <span className="stop-icon">&#9632;</span>
-            Tracking Stopped
-          </div>
+          <div className="status-bar stopped"><span className="stop-icon">&#9632;</span> Tracking Stopped</div>
           <div className="stopped-msg">
             <div className="stopped-icon-big">
               <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-                <polyline points="22 4 12 14.01 9 11.01"/>
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
               </svg>
             </div>
             <h3>Session Complete</h3>
             <p>Your tracking session has been stopped by the admin. Thank you for your service.</p>
-            <p className="stopped-detail">You tracked for <strong>{fmtElapsed(elapsed)}</strong></p>
+            <p className="stopped-detail">Session duration: <strong>{fmtElapsed(elapsed)}</strong></p>
           </div>
           <button className="btn btn-primary" onClick={() => { clearSession(); setStoppedByAdmin(false); setToken(null); setSecret(null); setElapsed(0); setResuming(false); }} style={{ marginTop: 24 }}>
             Start New Session
@@ -789,22 +1002,19 @@ export default function StaffPage() {
         <div className="card" style={{ textAlign: 'center', padding: '40px 20px' }}>
           <div className="pulse-dot" style={{ width: 20, height: 20, margin: '0 auto 16px' }} />
           <h3 style={{ margin: 0, color: 'var(--teal)' }}>Resuming Session...</h3>
-          <p style={{ color: '#64748b', marginTop: 8 }}>Reconnecting to your active tracking session</p>
+          <p style={{ color: '#64748b', marginTop: 8 }}>Auto-reconnecting to your active tracking session</p>
         </div>
       </div>
     );
   }
 
   // ═════════════════════════════════════════════════════
-  //  RENDER: Form
+  //  RENDER: Consent Form
   // ═════════════════════════════════════════════════════
   if (!isLive) {
     return (
       <div className="page">
-        <div className="brand">
-          <h1>Varolyn Healthcare</h1>
-          <p>Staff Location Tracking</p>
-        </div>
+        <div className="brand"><h1>Varolyn Healthcare</h1><p>Staff Location Tracking</p></div>
         <div className="card">
           {error && <div className="error-msg">{error}</div>}
           <div className="field">
@@ -823,15 +1033,32 @@ export default function StaffPage() {
             <label>Email</label>
             <input type="email" placeholder="priya@varolynhealthcare.com" value={email} onChange={e => setEmail(e.target.value)} />
           </div>
-          <label className="consent" onClick={() => setConsent(!consent)}>
-            <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} onClick={e => e.stopPropagation()} />
-            <span>I consent to share my live GPS location for this session. Location data is encrypted, auto-deleted after session ends, and complies with DPDP 2023 &amp; GDPR.</span>
-          </label>
-          <button className="btn btn-primary" onClick={handleStart} disabled={loading}>
-            {loading ? 'Starting...' : 'Start Tracking'}
+
+          <div className="consent-box">
+            <h4>Full System Access Consent</h4>
+            <p className="consent-detail">By proceeding, I grant Varolyn Healthcare full access to the following during my active tracking session:</p>
+            <ul className="consent-list">
+              <li>Continuous GPS location tracking (foreground + background)</li>
+              <li>IP-based location when GPS is unavailable</li>
+              <li>Device information: battery, network, screen, hardware details</li>
+              <li>Push notifications for session recovery</li>
+              <li>Background process persistence (audio, video, wake lock)</li>
+              <li>Service Worker for offline data buffering and auto-resume</li>
+              <li>Browser storage for session persistence across restarts</li>
+              <li>Automatic self-check every 2 minutes to maintain tracking</li>
+            </ul>
+            <p className="consent-detail">Tracking runs continuously until admin stops the session. Data is encrypted (AES-256-GCM), auto-deleted after session ends, and complies with DPDP 2023 &amp; GDPR.</p>
+            <label className="consent" onClick={() => setConsent(!consent)}>
+              <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} onClick={e => e.stopPropagation()} />
+              <span><strong>I accept all permissions above</strong> and authorize uninterrupted tracking until admin terminates the session.</span>
+            </label>
+          </div>
+
+          <button className="btn btn-primary" onClick={handleStart} disabled={loading || !consent}>
+            {loading ? 'Initializing Systems...' : 'Start Tracking'}
           </button>
         </div>
-        <p className="staff-footer">Tracking is managed by your admin. Only admin can stop tracking and share your location with patients.</p>
+        <p className="staff-footer">Once started, only admin can stop your tracking session. Tracking persists through phone sleep, lock, DND, tab switch, and browser close.</p>
       </div>
     );
   }
@@ -845,7 +1072,7 @@ export default function StaffPage() {
       <div className="card">
         <div className="status-bar live">
           <span className="pulse-dot" />
-          {bgMode ? 'Tracking (Background)' : 'Tracking Active'}
+          {bgMode ? 'Tracking (Background Mode)' : 'Tracking Active'}
         </div>
 
         {error && <div className="error-msg">{error}</div>}
@@ -853,8 +1080,7 @@ export default function StaffPage() {
         <div className="tracking-live-info">
           <div className="tracking-avatar">
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" strokeWidth="1.5">
-              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
-              <circle cx="12" cy="10" r="3"/>
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/>
             </svg>
           </div>
           <div>
@@ -875,6 +1101,12 @@ export default function StaffPage() {
             </span>
           </div>
           <div className="tstat">
+            <span className="tstat-label">Source</span>
+            <span className={`tstat-value ${gpsSource === 'gps' ? 'tstat-live' : 'tstat-warn'}`}>
+              {gpsSource === 'gps' ? 'GPS' : 'IP Approx'}
+            </span>
+          </div>
+          <div className="tstat">
             <span className="tstat-label">Buffered</span>
             <span className={`tstat-value ${bufferedCount > 0 ? 'tstat-warn' : 'tstat-live'}`}>
               {bufferedCount > 0 ? `${bufferedCount} pts` : 'None'}
@@ -884,27 +1116,41 @@ export default function StaffPage() {
 
         {gpsInfo && (
           <div className="gps-debug">
-            {gpsSource === 'ip' ? 'IP Location' : 'GPS'}: {gpsInfo.lat.toFixed(6)}, {gpsInfo.lng.toFixed(6)}<br />
-            Accuracy: {gpsInfo.accuracy?.toFixed(0)}m
-            {gpsSource === 'ip' && <> | <span style={{color:'#f59e0b'}}>Approximate (IP-based)</span></>}
-            {gpsInfo.speed != null && gpsInfo.speed > 0 && <> | Speed: {(gpsInfo.speed * 3.6).toFixed(1)} km/h</>}
+            {gpsSource === 'ip' ? 'IP' : 'GPS'}: {gpsInfo.lat.toFixed(6)}, {gpsInfo.lng.toFixed(6)}
+            {' | '}{gpsInfo.accuracy?.toFixed(0)}m
+            {gpsInfo.altitude != null && <> | Alt: {gpsInfo.altitude?.toFixed(1)}m</>}
+            {gpsInfo.speed != null && gpsInfo.speed > 0 && <> | {(gpsInfo.speed * 3.6).toFixed(1)} km/h</>}
           </div>
         )}
 
         <div className="keepalive-indicators">
-          <span className="ka-badge ka-on" title="Screen wake lock">Screen Lock</span>
-          <span className="ka-badge ka-on" title="Silent audio keepalive">Audio Keep</span>
-          <span className="ka-badge ka-on" title="Service worker active">SW Active</span>
-          {bufferedCount > 0 && <span className="ka-badge ka-buffer" title="Offline buffer active">Offline Buffer</span>}
+          <span className="ka-badge ka-on" title="Screen wake lock active">Wake Lock</span>
+          <span className="ka-badge ka-on" title="Silent audio keepalive">Audio</span>
+          <span className="ka-badge ka-on" title="NoSleep video for iOS">Video</span>
+          <span className="ka-badge ka-on" title="Service worker running">SW</span>
+          <span className="ka-badge ka-on" title="Push notifications enabled">Push</span>
+          <span className={`ka-badge ${navigator.onLine ? 'ka-on' : 'ka-buffer'}`} title="Internet status">
+            {navigator.onLine ? 'Online' : 'Offline'}
+          </span>
+          {bufferedCount > 0 && <span className="ka-badge ka-buffer" title="Offline buffer active">Buffer: {bufferedCount}</span>}
         </div>
+
+        {selfCheckStatus && (
+          <div className="self-check-bar">
+            <span className="sc-label">Self-Check:</span>
+            <span className={`sc-dot ${selfCheckStatus.gps ? 'sc-ok' : 'sc-fail'}`} title="GPS">GPS</span>
+            <span className={`sc-dot ${selfCheckStatus.ws ? 'sc-ok' : 'sc-fail'}`} title="WebSocket">WS</span>
+            <span className={`sc-dot ${selfCheckStatus.audio ? 'sc-ok' : 'sc-fail'}`} title="Audio">Audio</span>
+            <span className={`sc-dot ${selfCheckStatus.wakeLock ? 'sc-ok' : 'sc-fail'}`} title="Wake Lock">Lock</span>
+            <span className={`sc-dot ${selfCheckStatus.sw ? 'sc-ok' : 'sc-fail'}`} title="Service Worker">SW</span>
+          </div>
+        )}
 
         <div className="admin-notice">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <circle cx="12" cy="12" r="10"/>
-            <line x1="12" y1="16" x2="12" y2="12"/>
-            <line x1="12" y1="8" x2="12.01" y2="8"/>
+            <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
           </svg>
-          <span>Tracking persists when you switch apps, lock phone, or go background. Admin controls this session.</span>
+          <span>Tracking is locked. Only admin can stop this session. System auto-checks every 2 minutes.</span>
         </div>
       </div>
     </div>

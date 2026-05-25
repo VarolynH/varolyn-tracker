@@ -866,6 +866,80 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════ */
+/*  CONSENT BOX                                            */
+/* ═══════════════════════════════════════════════════════ */
+.consent-box {
+  background: #f0fdfa;
+  border: 1px solid #99f6e4;
+  border-radius: var(--radius);
+  padding: 16px;
+  margin: 16px 0;
+}
+.consent-box h4 {
+  color: var(--teal-dk);
+  font-size: .95rem;
+  margin-bottom: 8px;
+}
+.consent-detail {
+  font-size: .78rem;
+  color: var(--gray-600);
+  line-height: 1.5;
+  margin-bottom: 8px;
+}
+.consent-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px 0;
+}
+.consent-list li {
+  font-size: .78rem;
+  color: var(--gray-600);
+  padding: 3px 0 3px 20px;
+  position: relative;
+}
+.consent-list li::before {
+  content: '\2713';
+  position: absolute;
+  left: 0;
+  color: var(--teal);
+  font-weight: 700;
+}
+
+/* ═══════════════════════════════════════════════════════ */
+/*  SELF-CHECK BAR                                         */
+/* ═══════════════════════════════════════════════════════ */
+.self-check-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  background: var(--gray-50);
+  border-radius: 8px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.sc-label {
+  font-size: .7rem;
+  font-weight: 600;
+  color: var(--gray-600);
+  margin-right: 4px;
+}
+.sc-dot {
+  font-size: .65rem;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+.sc-ok {
+  background: #dcfce7;
+  color: #16a34a;
+}
+.sc-fail {
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+/* ═══════════════════════════════════════════════════════ */
 /*  RESPONSIVE                                             */
 /* ═══════════════════════════════════════════════════════ */
 @media (max-width: 640px) {
