@@ -40,43 +40,68 @@ export default function StaffPage() {
 
   const [token, setToken]           = useState(null);
   const [sessionSecret, setSecret]  = useState(null);
-  const [expiresAt, setExpiresAt]   = useState(null);
-  const [timeLeft, setTimeLeft]     = useState('');
   const [isLive, setIsLive]         = useState(false);
+  const [stoppedByAdmin, setStoppedByAdmin] = useState(false);
   const [error, setError]           = useState('');
   const [loading, setLoading]       = useState(false);
-  const [toast, setToast]           = useState('');
 
-  const [recipientPhone, setRecipientPhone] = useState('');
-
-  const wsRef    = useRef(null);
-  const watchRef = useRef(null);
-  const secretRef = useRef(null);       // keep secret in ref for callbacks
+  const wsRef      = useRef(null);
+  const watchRef   = useRef(null);
+  const secretRef  = useRef(null);
+  const wakeLockRef = useRef(null);
   const [gpsInfo, setGpsInfo]   = useState(null);
   const [wsStatus, setWsStatus] = useState('disconnected');
-
-  const shareUrl = token ? `${window.location.origin}/track/${token}` : '';
+  const [elapsed, setElapsed]   = useState(0);
+  const startTimeRef = useRef(null);
 
   // keep secretRef in sync
   useEffect(() => { secretRef.current = sessionSecret; }, [sessionSecret]);
 
-  // ── Countdown ─────────────────────────────────────────
+  // ── Elapsed timer ─────────────────────────────────────
   useEffect(() => {
-    if (!expiresAt) return;
-    const tick = () => {
-      const d = new Date(expiresAt) - Date.now();
-      if (d <= 0) { setTimeLeft('Expired'); handleStop(); return; }
-      const h = Math.floor(d / 3600000);
-      const m = Math.floor((d % 3600000) / 60000);
-      const s = Math.floor((d % 60000) / 1000);
-      setTimeLeft(`${h}h ${m}m ${s}s`);
-    };
-    tick();
-    const id = setInterval(tick, 1000);
+    if (!isLive) return;
+    startTimeRef.current = Date.now();
+    const id = setInterval(() => {
+      const s = Math.floor((Date.now() - startTimeRef.current) / 1000);
+      setElapsed(s);
+    }, 1000);
     return () => clearInterval(id);
-  }, [expiresAt]);
+  }, [isLive]);
 
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 2500); };
+  const fmtElapsed = (s) => {
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const sec = s % 60;
+    if (h > 0) return `${h}h ${m}m ${sec}s`;
+    if (m > 0) return `${m}m ${sec}s`;
+    return `${sec}s`;
+  };
+
+  // ── Wake Lock — prevent device sleep ──────────────────
+  const requestWakeLock = async () => {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLockRef.current = await navigator.wakeLock.request('screen');
+        wakeLockRef.current.addEventListener('release', () => {
+          // Re-acquire on visibility change
+        });
+      }
+    } catch {}
+  };
+  const releaseWakeLock = () => {
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release().catch(() => {});
+      wakeLockRef.current = null;
+    }
+  };
+  // Re-acquire wake lock when page becomes visible again
+  useEffect(() => {
+    const handler = () => {
+      if (document.visibilityState === 'visible' && isLive) requestWakeLock();
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, [isLive]);
 
   // ── Start Session ─────────────────────────────────────
   const handleStart = async () => {
@@ -106,29 +131,25 @@ export default function StaffPage() {
 
       setToken(data.token);
       setSecret(data.sessionSecret);
-      setExpiresAt(data.expiresAt);
       setIsLive(true);
+      setStoppedByAdmin(false);
       startGPS(data.token);
       connectWS(data.token, data.sessionSecret);
+      requestWakeLock();
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
 
-  // ── Stop Session (requires sessionSecret) ─────────────
-  const handleStop = async () => {
-    try {
-      await fetch(`${API}/api/stop`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token, sessionSecret: secretRef.current }),
-      });
-    } catch {}
+  // ── Cleanup when stopped by admin ─────────────────────
+  const handleAdminStop = useCallback(() => {
     if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
-    setIsLive(false); setToken(null); setSecret(null);
-    setExpiresAt(null); setGpsInfo(null); setWsStatus('disconnected');
-    showToast('Location sharing stopped');
-  };
+    releaseWakeLock();
+    setIsLive(false);
+    setStoppedByAdmin(true);
+    setGpsInfo(null);
+    setWsStatus('disconnected');
+  }, []);
 
   // ── GPS ───────────────────────────────────────────────
   const startGPS = useCallback((tok) => {
@@ -172,7 +193,6 @@ export default function StaffPage() {
 
     ws.onopen = () => {
       setWsStatus('authenticating');
-      // Server expects auth message with sessionSecret first
       ws.send(JSON.stringify({ type: 'auth', sessionSecret: secret }));
     };
 
@@ -182,41 +202,66 @@ export default function StaffPage() {
         if (m.type === 'connected')    setWsStatus('connected');
         if (m.type === 'ack')          setWsStatus('connected');
         if (m.type === 'auth_required') {} // waiting for our auth message
+        if (m.type === 'session_ended') {
+          // Admin stopped the session
+          handleAdminStop();
+          return;
+        }
         if (m.error) { setWsStatus('auth_failed'); ws.close(); }
       } catch {}
     };
 
     ws.onclose = () => {
+      // Only reconnect if still supposed to be live
+      if (!wsRef.current) return;
       setWsStatus('reconnecting');
       setTimeout(() => {
-        if (!wsRef.current || wsRef.current.readyState > 1) {
+        if (wsRef.current && wsRef.current.readyState > 1) {
           connectWS(tok, secretRef.current);
         }
       }, 3000);
     };
     ws.onerror = () => setWsStatus('error');
-  }, []);
+  }, [handleAdminStop]);
 
-  // ── Share handlers ────────────────────────────────────
-  const handleCopy = () => navigator.clipboard.writeText(shareUrl).then(() => showToast('Link copied!'));
-  const handleWhatsApp = () => {
-    const p = recipientPhone.replace(/\D/g, '');
-    const m = encodeURIComponent(`Track my live location:\n${shareUrl}\n\n— ${name}, Varolyn Healthcare`);
-    window.open(`https://wa.me/${p}?text=${m}`, '_blank');
-  };
-  const handleSMS = () => {
-    window.open(`sms:${recipientPhone}?body=${encodeURIComponent(`Track my live location: ${shareUrl}`)}`, '_blank');
-  };
-  const handleShare = async () => {
-    if (navigator.share) {
-      try { await navigator.share({ title: 'Live Location — Varolyn Healthcare', url: shareUrl }); } catch {}
-    } else handleCopy();
-  };
-
+  // Cleanup on unmount
   useEffect(() => () => {
     if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
     if (wsRef.current) wsRef.current.close();
+    releaseWakeLock();
   }, []);
+
+  // ── Render: Stopped by Admin ──────────────────────────
+  if (stoppedByAdmin) {
+    return (
+      <div className="page">
+        <div className="brand">
+          <h1>Varolyn Healthcare</h1>
+          <p>Live Location Tracking</p>
+        </div>
+        <div className="card">
+          <div className="status-bar stopped">
+            <span className="stop-icon">&#9632;</span>
+            Tracking Stopped
+          </div>
+          <div className="stopped-msg">
+            <div className="stopped-icon-big">
+              <svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
+                <polyline points="22 4 12 14.01 9 11.01"/>
+              </svg>
+            </div>
+            <h3>Session Complete</h3>
+            <p>Your tracking session has been stopped by the admin. Thank you for your service.</p>
+            <p className="stopped-detail">You tracked for <strong>{fmtElapsed(elapsed)}</strong></p>
+          </div>
+          <button className="btn btn-primary" onClick={() => { setStoppedByAdmin(false); setToken(null); setSecret(null); setElapsed(0); }} style={{ marginTop: 24 }}>
+            Start New Session
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // ── Render: Form ──────────────────────────────────────
   if (!isLive) {
@@ -224,7 +269,7 @@ export default function StaffPage() {
       <div className="page">
         <div className="brand">
           <h1>Varolyn Healthcare</h1>
-          <p>Live Location Sharing</p>
+          <p>Staff Location Tracking</p>
         </div>
         <div className="card">
           {error && <div className="error-msg">{error}</div>}
@@ -246,55 +291,78 @@ export default function StaffPage() {
           </div>
           <label className="consent" onClick={() => setConsent(!consent)}>
             <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} onClick={e => e.stopPropagation()} />
-            <span>I consent to share my live GPS location for this session. Location data is encrypted, auto-deleted after 4 hours, and complies with DPDP 2023 &amp; GDPR.</span>
+            <span>I consent to share my live GPS location for this session. Location data is encrypted, auto-deleted after session ends, and complies with DPDP 2023 &amp; GDPR.</span>
           </label>
           <button className="btn btn-primary" onClick={handleStart} disabled={loading}>
-            {loading ? 'Starting...' : 'Start Sharing Location'}
+            {loading ? 'Starting...' : 'Start Tracking'}
           </button>
         </div>
+        <p className="staff-footer">Tracking is managed by your admin. Only admin can stop tracking and share your location with patients.</p>
       </div>
     );
   }
 
-  // ── Render: Live ──────────────────────────────────────
+  // ── Render: Live Tracking (no stop button, no share link) ──
   return (
     <div className="page">
       <div className="brand"><h1>Varolyn Healthcare</h1></div>
       <div className="card">
-        <div className="status-bar live"><span className="pulse-dot" />Live — Sharing Your Location</div>
+        <div className="status-bar live">
+          <span className="pulse-dot" />
+          Tracking Active
+        </div>
+
         {error && <div className="error-msg">{error}</div>}
 
-        <div className="share-section" style={{ borderTop: 'none', paddingTop: 0, marginTop: 0 }}>
-          <h3>Send tracking link to recipient</h3>
-          <div className="field" style={{ marginBottom: 8 }}>
-            <input type="tel" placeholder="Recipient's phone (+91...)" value={recipientPhone} onChange={e => setRecipientPhone(e.target.value)} />
+        <div className="tracking-live-info">
+          <div className="tracking-avatar">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" strokeWidth="1.5">
+              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+              <circle cx="12" cy="10" r="3"/>
+            </svg>
           </div>
-          <div className="share-row">
-            <button className="share-btn whatsapp" onClick={handleWhatsApp} disabled={!recipientPhone.trim()}>WhatsApp</button>
-            <button className="share-btn" onClick={handleSMS} disabled={!recipientPhone.trim()}>SMS</button>
-          </div>
-          <div className="share-row" style={{ marginTop: 8 }}>
-            <button className="share-btn" onClick={handleCopy}>Copy Link</button>
-            <button className="share-btn" onClick={handleShare}>Share</button>
-          </div>
-          <div className="link-box" style={{ marginTop: 12 }}>
-            <input value={shareUrl} readOnly />
+          <div>
+            <h3 className="tracking-name">{name}</h3>
+            {designation && <p className="tracking-desig">{designation}</p>}
           </div>
         </div>
 
-        <div className="timer">Session expires in: <strong>{timeLeft}</strong></div>
+        <div className="tracking-stats">
+          <div className="tstat">
+            <span className="tstat-label">Duration</span>
+            <span className="tstat-value">{fmtElapsed(elapsed)}</span>
+          </div>
+          <div className="tstat">
+            <span className="tstat-label">Status</span>
+            <span className="tstat-value tstat-live">
+              <span className="pulse-dot" style={{ width: 6, height: 6 }} /> Live
+            </span>
+          </div>
+          <div className="tstat">
+            <span className="tstat-label">Connection</span>
+            <span className={`tstat-value ${wsStatus === 'connected' ? 'tstat-live' : 'tstat-warn'}`}>
+              {wsStatus === 'connected' ? 'Connected' : wsStatus === 'reconnecting' ? 'Reconnecting...' : wsStatus}
+            </span>
+          </div>
+        </div>
 
         {gpsInfo && (
           <div className="gps-debug">
             GPS: {gpsInfo.lat.toFixed(6)}, {gpsInfo.lng.toFixed(6)}<br />
-            Accuracy: {gpsInfo.accuracy?.toFixed(0)}m | Speed: {gpsInfo.speed != null ? (gpsInfo.speed * 3.6).toFixed(1) + ' km/h' : '—'}<br />
-            WebSocket: {wsStatus}
+            Accuracy: {gpsInfo.accuracy?.toFixed(0)}m
+            {gpsInfo.speed != null && gpsInfo.speed > 0 && <> | Speed: {(gpsInfo.speed * 3.6).toFixed(1)} km/h</>}
           </div>
         )}
 
-        <button className="btn btn-danger" onClick={handleStop} style={{ marginTop: 20 }}>Stop Sharing</button>
+        <div className="admin-notice">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="16" x2="12" y2="12"/>
+            <line x1="12" y1="8" x2="12.01" y2="8"/>
+          </svg>
+          <span>Tracking is managed by admin. Keep this page open — your screen will stay awake.</span>
+        </div>
       </div>
-      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }

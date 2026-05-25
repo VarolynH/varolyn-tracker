@@ -389,29 +389,8 @@ async function build() {
     };
   });
 
-  /** POST /api/stop — Staff stops their session (requires sessionSecret) */
-  app.post('/api/stop', async (req, reply) => {
-    const { token, sessionSecret } = req.body || {};
-    if (!token || !sessionSecret) return reply.code(400).send({ error: 'Token and sessionSecret required' });
-    if (!isValidToken(token)) return reply.code(400).send({ error: 'Invalid token format' });
-
-    // Fetch then timing-safe compare (prevents timing side-channel)
-    const sess = await db.query(
-      `SELECT session_secret FROM tracking_sessions WHERE token=$1 AND status='active'`, [token]);
-    if (sess.rows.length === 0 || !safeCompare(sess.rows[0].session_secret, sessionSecret))
-      return reply.code(404).send({ error: 'Session not found' });
-
-    const { rowCount } = await db.query(
-      `UPDATE tracking_sessions SET status='stopped', stopped_at=NOW()
-       WHERE token=$1 AND status='active'`, [token]);
-    if (rowCount === 0) return reply.code(404).send({ error: 'Session not found' });
-
-    await redisPub.publish(`tracking:${token}`, JSON.stringify({ type: 'session_ended' }));
-    kalmanFilters.delete(token);
-    await auditLog('session_stopped', null, token, req.ip);
-    fireZohoWebhook('session_stopped', { trackingToken: token });
-    return { success: true };
-  });
+  // NOTE: Staff CANNOT stop their own session — only admin can stop tracking.
+  // The old /api/stop endpoint has been removed. Admin uses /api/admin/stop-session.
 
   // ═════════════════════════════════════════════════════
   //  CUSTOMER ENDPOINTS (public, minimal data)
@@ -507,6 +486,25 @@ async function build() {
     await redisPub.publish(`tracking:${token}`, JSON.stringify({ type: 'session_ended' }));
     kalmanFilters.delete(token);
     await auditLog('admin_stop_session', req.adminEmail, token, req.ip);
+    fireZohoWebhook('session_stopped', { trackingToken: token, stoppedBy: req.adminEmail });
+    return { success: true };
+  });
+
+  /** Admin updates session duration (extends/shortens expiry) */
+  app.post('/api/admin/update-duration', { preHandler: requireAdmin }, async (req, reply) => {
+    const { token, hours } = req.body || {};
+    if (!token || !isValidToken(token)) return reply.code(400).send({ error: 'Invalid token' });
+    if (typeof hours !== 'number' || hours <= 0 || hours > 720)
+      return reply.code(400).send({ error: 'Hours must be between 0.5 and 720 (30 days)' });
+
+    const { rowCount } = await db.query(
+      `UPDATE tracking_sessions
+       SET expires_at = started_at + ($1 || ' hours')::INTERVAL
+       WHERE token=$2 AND status='active'`,
+      [String(hours), token]);
+    if (rowCount === 0) return reply.code(404).send({ error: 'Session not found' });
+
+    await auditLog('admin_update_duration', req.adminEmail, token, req.ip, { hours });
     return { success: true };
   });
 
@@ -566,6 +564,28 @@ async function build() {
               clearTimeout(authTimeout);
               flushTimer = setInterval(flush, 5000);
               socket.send(JSON.stringify({ type: 'connected', token }));
+
+              // Subscribe to admin stop commands via Redis so staff gets notified
+              const staffSub = new Redis(REDIS_URL, redisOpts);
+              staffSub.on('error', () => {});
+              staffSub.connect().then(() => {
+                staffSub.subscribe(`tracking:${token}`, () => {});
+                staffSub.on('message', (_ch, rawMsg) => {
+                  try {
+                    const parsed = JSON.parse(rawMsg);
+                    if (parsed.type === 'session_ended') {
+                      socket.send(JSON.stringify({ type: 'session_ended' }));
+                      socket.close(4010);
+                    }
+                  } catch {}
+                });
+              }).catch(() => {});
+
+              // Clean up staff subscriber on disconnect
+              socket.on('close', () => {
+                staffSub.unsubscribe().catch(() => {});
+                staffSub.quit().catch(() => {});
+              });
             } else {
               socket.send(JSON.stringify({ error: 'Authentication failed' }));
               socket.close(4003);
