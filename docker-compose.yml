@@ -1,0 +1,100 @@
+# ══════════════════════════════════════════════════════
+#  Varolyn Healthcare — Docker Compose (Production)
+# ══════════════════════════════════════════════════════
+#
+#  Usage:
+#    1. Copy .env.example → .env and fill in your values
+#    2. docker compose up -d --build
+#    3. First run only — seed the database schema:
+#       docker compose exec app node -e "
+#         const { readFileSync } = require('fs');
+#         const { Pool } = require('pg');
+#         const pool = new Pool({ connectionString: process.env.DATABASE_URL || 'postgresql://varolyn:varolyn_secret@postgres:5432/varolyn_tracker' });
+#         pool.query(readFileSync('/schema/schema-v2.sql','utf8')).then(() => { console.log('Schema created'); process.exit(0); }).catch(e => { console.error(e); process.exit(1); });
+#       "
+#
+#  Or run the schema directly:
+#    docker compose exec postgres psql -U varolyn -d varolyn_tracker -f /schema/schema-v2.sql
+#
+
+version: '3.8'
+
+services:
+  # ── PostgreSQL ──
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: varolyn_tracker
+      POSTGRES_USER: varolyn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-varolyn_secret}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db:/docker-entrypoint-initdb.d    # Auto-runs schema-v2.sql on first start
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U varolyn -d varolyn_tracker"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ──
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 64mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── App (Fastify + React) ──
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8080}:8080"
+    environment:
+      PORT: 8080
+      NODE_ENV: production
+
+      # Database
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: varolyn_tracker
+      POSTGRES_USER: varolyn
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-varolyn_secret}
+
+      # Redis
+      REDIS_URL: redis://redis:6379
+
+      # Security (CHANGE THESE IN .env!)
+      JWT_SECRET: ${JWT_SECRET}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+
+      # Admin credentials (first run seeds this user)
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@varolynhealthcare.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+
+      # CORS
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-}
+
+      # Zoho CRM integration (optional)
+      ZOHO_CRM_WEBHOOK_URL: ${ZOHO_CRM_WEBHOOK_URL:-}
+
+      # Logging
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./db:/schema:ro    # Mount schema for manual seeding
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:

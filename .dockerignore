@@ -1,0 +1,13 @@
+node_modules
+.env
+.git
+.gitignore
+*.md
+docs
+tests
+scripts
+services
+infrastructure
+start-local.sh
+start-v2.sh
+.DS_Store

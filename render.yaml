@@ -1,0 +1,59 @@
+# ══════════════════════════════════════════════════════
+#  Varolyn Healthcare — Render.com Blueprint
+# ══════════════════════════════════════════════════════
+
+services:
+  - type: web
+    name: varolyn-tracker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: NODE_ENV
+        value: production
+      - key: POSTGRES_HOST
+        fromDatabase:
+          name: varolyn-db
+          property: host
+      - key: POSTGRES_PORT
+        fromDatabase:
+          name: varolyn-db
+          property: port
+      - key: POSTGRES_DB
+        fromDatabase:
+          name: varolyn-db
+          property: database
+      - key: POSTGRES_USER
+        fromDatabase:
+          name: varolyn-db
+          property: user
+      - key: POSTGRES_PASSWORD
+        fromDatabase:
+          name: varolyn-db
+          property: password
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: varolyn-redis
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: ADMIN_EMAIL
+        value: admin@varolynhealthcare.com
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ZOHO_CRM_WEBHOOK_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+
+databases:
+  - name: varolyn-db
+    databaseName: varolyn_tracker
+    user: varolyn
+    plan: free
