@@ -318,6 +318,24 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
   const net   = s.network || dev.network || {};
   const loc   = s.location;
 
+  // Offline detection: no update for 60+ seconds = offline
+  const lastUpdateMs = loc?.updatedAt ? Date.now() - new Date(loc.updatedAt).getTime() : Infinity;
+  const isOffline = !past && s.status === 'active' && lastUpdateMs > 60000;
+  const offlineDuration = isOffline ? timeAgo(loc?.updatedAt) : '';
+
+  // Dead reckoning: estimate current position if offline + had speed/heading
+  let estimatedLoc = null;
+  if (isOffline && loc && loc.speed > 0 && loc.heading != null) {
+    const elapsedSec = lastUpdateMs / 1000;
+    const maxDriftSec = 600; // only predict up to 10 min
+    const driftSec = Math.min(elapsedSec, maxDriftSec);
+    const distMeters = loc.speed * driftSec;
+    const headingRad = (loc.heading * Math.PI) / 180;
+    const dLat = (distMeters * Math.cos(headingRad)) / 111320;
+    const dLng = (distMeters * Math.sin(headingRad)) / (111320 * Math.cos(loc.lat * Math.PI / 180));
+    estimatedLoc = { lat: loc.lat + dLat, lng: loc.lng + dLng };
+  }
+
   const ipCity = ipGeo.status !== 'fail'
     ? [ipGeo.city, ipGeo.regionName, ipGeo.countryCode || ipGeo.country].filter(Boolean).join(', ')
     : '';
@@ -342,15 +360,24 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
       {/* Header row */}
       <div className="sc-header">
         <div className="sc-status">
-          {!past && <span className="pulse-dot" style={{ width: 8, height: 8 }} />}
-          <span className={`sc-badge ${past ? 'off' : 'on'}`}>
-            {past ? (s.status === 'expired' ? 'EXPIRED' : 'STOPPED') : 'LIVE'}
+          {!past && !isOffline && <span className="pulse-dot" style={{ width: 8, height: 8 }} />}
+          <span className={`sc-badge ${past ? 'off' : isOffline ? 'offline' : 'on'}`}>
+            {past ? (s.status === 'expired' ? 'EXPIRED' : 'STOPPED') : isOffline ? 'OFFLINE' : 'LIVE'}
           </span>
           {!past && s.expiresAt && (
             <span className="sc-expires">Expires: {timeUntil(s.expiresAt)}</span>
           )}
         </div>
       </div>
+
+      {/* Offline alert banner */}
+      {isOffline && (
+        <div className="sc-offline-banner">
+          <span className="pulse-warn" />
+          Staff device offline
+          <span className="sc-lastseen">Last seen: {offlineDuration}</span>
+        </div>
+      )}
 
       {/* Staff Info */}
       <h3 className="sc-name">{s.staffName}</h3>
@@ -371,10 +398,16 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
             </span>
           </div>
         )}
+        {estimatedLoc && (
+          <div className="osint-row">
+            <span className="osint-icon">&#128268;</span>
+            <span className="sc-estimated">Est: {estimatedLoc.lat.toFixed(5)}, {estimatedLoc.lng.toFixed(5)} (predicted)</span>
+          </div>
+        )}
         {loc?.updatedAt && (
           <div className="osint-row">
             <span className="osint-icon">&#128336;</span>
-            <span>Updated {timeAgo(loc.updatedAt)}</span>
+            <span>Updated {timeAgo(loc.updatedAt)}{isOffline ? ' (OFFLINE)' : ''}</span>
           </div>
         )}
         {loc?.speed > 0 && (

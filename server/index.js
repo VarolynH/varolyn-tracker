@@ -395,6 +395,78 @@ async function build() {
   // The old /api/stop endpoint has been removed. Admin uses /api/admin/stop-session.
 
   // ═════════════════════════════════════════════════════
+  //  OFFLINE BUFFER — batch sync when staff comes back online
+  // ═════════════════════════════════════════════════════
+
+  app.post('/api/batch-locations', async (req, reply) => {
+    const { token, sessionSecret, locations } = req.body || {};
+    if (!token || !sessionSecret || !Array.isArray(locations) || locations.length === 0)
+      return reply.code(400).send({ error: 'Invalid batch data' });
+    if (!isValidToken(token))
+      return reply.code(400).send({ error: 'Invalid token' });
+
+    // Verify session + secret
+    const sess = await db.query(
+      `SELECT id, session_secret FROM tracking_sessions WHERE token=$1 AND status='active'`, [token]);
+    if (sess.rows.length === 0 || !safeCompare(sess.rows[0].session_secret, sessionSecret))
+      return reply.code(404).send({ error: 'Session not found' });
+
+    const sessionId = sess.rows[0].id;
+    if (!kalmanFilters.has(token)) kalmanFilters.set(token, new GPSKalmanFilter());
+    const kf = kalmanFilters.get(token);
+
+    // Process all buffered locations
+    const vals = []; const phs = []; let n = 1;
+    let lastFiltered = null;
+
+    for (const loc of locations.slice(0, 500)) { // max 500 points per batch
+      if (typeof loc.lat !== 'number' || typeof loc.lng !== 'number') continue;
+      if (loc.lat < -90 || loc.lat > 90 || loc.lng < -180 || loc.lng > 180) continue;
+
+      const ts = loc.ts || Date.now();
+      const f = kf.filter({ lat: loc.lat, lng: loc.lng, accuracy: loc.accuracy || 10, speed: loc.speed || 0, timestamp: ts });
+      if (f.isOutlier) continue;
+
+      phs.push(`($${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++},$${n++})`);
+      vals.push(sessionId, new Date(ts), f.lat, f.lng, loc.lat, loc.lng,
+                loc.accuracy || null, loc.speed || null, loc.heading || null);
+      lastFiltered = { f, loc, ts };
+    }
+
+    if (phs.length > 0) {
+      try {
+        await db.query(
+          `INSERT INTO location_points (session_id,recorded_at,lat,lng,raw_lat,raw_lng,accuracy,speed,heading) VALUES ${phs.join(',')}`, vals);
+      } catch {}
+    }
+
+    // Update session with latest location
+    if (lastFiltered) {
+      const { f, loc } = lastFiltered;
+      await db.query(
+        `UPDATE tracking_sessions
+         SET last_lat=$1, last_lng=$2, last_accuracy=$3, last_speed=$4, last_heading=$5,
+             last_update=NOW(),
+             last_battery=COALESCE($6::jsonb, last_battery),
+             last_network=COALESCE($7::jsonb, last_network)
+         WHERE token=$8`,
+        [f.lat, f.lng, loc.accuracy, loc.speed, loc.heading,
+         loc.battery ? JSON.stringify(loc.battery) : null,
+         loc.network ? JSON.stringify(loc.network) : null, token]);
+
+      // Publish latest to SSE customers
+      await redisPub.publish(`tracking:${token}`, JSON.stringify({
+        type: 'location_update', lat: f.lat, lng: f.lng,
+        accuracy: loc.accuracy, speed: loc.speed, heading: loc.heading,
+        battery: loc.battery, network: loc.network, timestamp: Date.now(),
+      }));
+    }
+
+    await auditLog('batch_sync', null, token, req.ip, { count: phs.length });
+    return { success: true, synced: phs.length };
+  });
+
+  // ═════════════════════════════════════════════════════
   //  CUSTOMER ENDPOINTS (public, minimal data)
   // ═════════════════════════════════════════════════════
 
