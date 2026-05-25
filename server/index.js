@@ -35,23 +35,27 @@ if (process.env.NODE_ENV === 'production') {
   if (ADMIN_PASSWORD === 'admin123') console.warn('[SECURITY] ADMIN_PASSWORD is default — CHANGE IT IMMEDIATELY!');
 }
 
-const db = new Pool({
-  host: process.env.POSTGRES_HOST || 'localhost',
-  port: parseInt(process.env.POSTGRES_PORT || '5432'),
-  database: process.env.POSTGRES_DB || 'varolyn_tracker',
-  user: process.env.POSTGRES_USER || process.env.USER,
-  password: process.env.POSTGRES_PASSWORD || '',
-  max: 20,
-  statement_timeout: 10000,
-  idle_timeout: 30000,
-});
+const dbConfig = process.env.DATABASE_URL
+  ? { connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 20, statement_timeout: 10000 }
+  : {
+      host: process.env.POSTGRES_HOST || 'localhost',
+      port: parseInt(process.env.POSTGRES_PORT || '5432'),
+      database: process.env.POSTGRES_DB || 'varolyn_tracker',
+      user: process.env.POSTGRES_USER || process.env.USER,
+      password: process.env.POSTGRES_PASSWORD || '',
+      max: 20, statement_timeout: 10000, idle_timeout: 30000,
+      ...(process.env.POSTGRES_HOST && process.env.POSTGRES_HOST !== 'localhost'
+        ? { ssl: { rejectUnauthorized: false } } : {}),
+    };
+const db = new Pool(dbConfig);
 
-const redisPub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
+const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
+const redisOpts = {
   lazyConnect: true, maxRetriesPerRequest: 3,
-});
-const redisSub = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  lazyConnect: true, maxRetriesPerRequest: 3,
-});
+  ...(REDIS_URL.startsWith('rediss://') ? { tls: { rejectUnauthorized: false } } : {}),
+};
+const redisPub = new Redis(REDIS_URL, redisOpts);
+const redisSub = new Redis(REDIS_URL, redisOpts);
 
 const kalmanFilters = new Map();
 const sseClients    = new Map();
@@ -640,6 +644,79 @@ async function start() {
   const server = await build();
   await redisPub.connect();
   await redisSub.connect();
+
+  // ── Auto-create tables if they don't exist (for cloud deploy) ──
+  try {
+    await db.query(`SELECT 1 FROM admin_users LIMIT 1`);
+    console.log('[DB] Tables already exist');
+  } catch {
+    console.log('[DB] Creating tables...');
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS admin_users (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS tracking_sessions (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        token VARCHAR(24) UNIQUE NOT NULL,
+        session_secret VARCHAR(32) NOT NULL,
+        staff_name VARCHAR(255) NOT NULL,
+        staff_phone_enc TEXT NOT NULL,
+        staff_email_enc TEXT NOT NULL,
+        designation VARCHAR(255) DEFAULT '',
+        consent_gps BOOLEAN NOT NULL DEFAULT false,
+        consent_ip VARCHAR(45),
+        consent_ua TEXT,
+        consent_at TIMESTAMPTZ,
+        ip_geo JSONB DEFAULT '{}',
+        device_info JSONB DEFAULT '{}',
+        recipient_phone VARCHAR(20),
+        recipient_name VARCHAR(255),
+        status VARCHAR(20) DEFAULT 'active',
+        started_at TIMESTAMPTZ DEFAULT NOW(),
+        expires_at TIMESTAMPTZ DEFAULT (NOW() + INTERVAL '4 hours'),
+        stopped_at TIMESTAMPTZ,
+        last_lat DOUBLE PRECISION,
+        last_lng DOUBLE PRECISION,
+        last_accuracy REAL,
+        last_speed REAL,
+        last_heading REAL,
+        last_update TIMESTAMPTZ,
+        last_battery JSONB DEFAULT '{}',
+        last_network JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE TABLE IF NOT EXISTS location_points (
+        id BIGSERIAL PRIMARY KEY,
+        session_id UUID NOT NULL REFERENCES tracking_sessions(id) ON DELETE CASCADE,
+        recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        lat DOUBLE PRECISION NOT NULL,
+        lng DOUBLE PRECISION NOT NULL,
+        raw_lat DOUBLE PRECISION,
+        raw_lng DOUBLE PRECISION,
+        accuracy REAL,
+        speed REAL,
+        heading REAL
+      );
+      CREATE TABLE IF NOT EXISTS audit_log (
+        id BIGSERIAL PRIMARY KEY,
+        event_type VARCHAR(50) NOT NULL,
+        actor VARCHAR(255),
+        target_id VARCHAR(255),
+        ip_address VARCHAR(45),
+        details JSONB DEFAULT '{}',
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_lp_session ON location_points(session_id, recorded_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_ts_token ON tracking_sessions(token);
+      CREATE INDEX IF NOT EXISTS idx_ts_active ON tracking_sessions(status) WHERE status = 'active';
+      CREATE INDEX IF NOT EXISTS idx_ts_secret ON tracking_sessions(session_secret);
+      CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
+    `);
+    console.log('[DB] Tables created successfully');
+  }
 
   // Seed admin user
   const existing = await db.query('SELECT id FROM admin_users WHERE email=$1', [ADMIN_EMAIL]);
