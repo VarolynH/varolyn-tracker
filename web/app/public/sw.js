@@ -1,21 +1,25 @@
 /* ═══════════════════════════════════════════════════════
  *  Varolyn Healthcare — Service Worker
- *  Background tracking, offline buffer, auto-resume
+ *  Background tracking, offline buffer, push recovery, auto-resume
  * ═══════════════════════════════════════════════════════ */
 
-const CACHE = 'varolyn-v3';
+const CACHE = 'varolyn-v4';
 const ASSETS = ['/', '/manifest.json'];
 const DB_NAME = 'varolyn_offline';
 const STORE = 'location_buffer';
+const SESSION_STORE = 'active_session';
 
-// ── IndexedDB helpers (for offline location buffering) ──
+// ── IndexedDB helpers ──
 function openDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, 2);
     req.onupgradeneeded = (e) => {
       const db = e.target.result;
       if (!db.objectStoreNames.contains(STORE)) {
         db.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+      }
+      if (!db.objectStoreNames.contains(SESSION_STORE)) {
+        db.createObjectStore(SESSION_STORE, { keyPath: 'key' });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -56,6 +60,39 @@ async function clearBuffer() {
   } catch {}
 }
 
+// ── Session persistence in SW ──
+async function saveActiveSession(session) {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(SESSION_STORE, 'readwrite');
+    tx.objectStore(SESSION_STORE).put({ key: 'current', ...session });
+    await new Promise((r) => { tx.oncomplete = r; });
+    db.close();
+  } catch {}
+}
+
+async function getActiveSession() {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(SESSION_STORE, 'readonly');
+    return new Promise((resolve) => {
+      const req = tx.objectStore(SESSION_STORE).get('current');
+      req.onsuccess = () => { db.close(); resolve(req.result || null); };
+      req.onerror = () => { db.close(); resolve(null); };
+    });
+  } catch { return null; }
+}
+
+async function clearActiveSession() {
+  try {
+    const db = await openDB();
+    const tx = db.transaction(SESSION_STORE, 'readwrite');
+    tx.objectStore(SESSION_STORE).delete('current');
+    await new Promise((r) => { tx.oncomplete = r; });
+    db.close();
+  } catch {}
+}
+
 // ── Install/Activate ──
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
@@ -89,7 +126,7 @@ self.addEventListener('fetch', (e) => {
   );
 });
 
-// ── Message handler: receive location data from main page ──
+// ── Message handler from main page ──
 self.addEventListener('message', async (e) => {
   const { type, data } = e.data || {};
 
@@ -107,9 +144,78 @@ self.addEventListener('message', async (e) => {
   }
 
   if (type === 'KEEPALIVE') {
-    // Just acknowledging — keeps SW alive
     e.source.postMessage({ type: 'ALIVE' });
   }
+
+  // Main page tells us about active session for background recovery
+  if (type === 'SET_SESSION') {
+    await saveActiveSession(data);
+  }
+
+  if (type === 'CLEAR_SESSION') {
+    await clearActiveSession();
+  }
+});
+
+// ══════════════════════════════════════════════════════
+//  PUSH NOTIFICATION — server sends when staff goes offline
+// ══════════════════════════════════════════════════════
+self.addEventListener('push', (e) => {
+  let payload = { title: 'Varolyn Healthcare', body: 'Tracking session needs attention' };
+  try {
+    if (e.data) payload = e.data.json();
+  } catch {
+    try { payload.body = e.data.text(); } catch {}
+  }
+
+  const options = {
+    body: payload.body || 'Your tracking session needs to resume. Tap to reopen.',
+    icon: '/favicon.ico',
+    badge: '/favicon.ico',
+    tag: 'varolyn-tracking-recovery',
+    renotify: true,
+    requireInteraction: true,
+    vibrate: [200, 100, 200, 100, 200],
+    data: {
+      url: '/',
+      token: payload.token || null,
+      action: payload.action || 'resume',
+    },
+    actions: [
+      { action: 'open', title: 'Open Tracker' },
+    ],
+  };
+
+  e.waitUntil(
+    self.registration.showNotification(payload.title || 'Varolyn Healthcare', options)
+  );
+});
+
+// ── Notification click — bring app to foreground / reopen tab ──
+self.addEventListener('notificationclick', (e) => {
+  e.notification.close();
+
+  const urlToOpen = e.notification.data?.url || '/';
+
+  e.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clientList) => {
+      // Try to focus an existing tab
+      for (const client of clientList) {
+        if (client.url.includes(self.location.origin) && 'focus' in client) {
+          await client.focus();
+          // Tell the page to resume tracking
+          client.postMessage({ type: 'PUSH_RESUME' });
+          return;
+        }
+      }
+      // No existing tab — open a new one (this is the auto-reopen on phone restart)
+      if (clients.openWindow) {
+        const win = await clients.openWindow(urlToOpen);
+        // The page will auto-resume via localStorage check on mount
+        return win;
+      }
+    })
+  );
 });
 
 // ── Periodic Background Sync (Chrome 80+) ──
@@ -130,25 +236,24 @@ async function syncBufferedLocations() {
   const items = await getBufferedLocations();
   if (items.length === 0) return;
 
+  // Get session info for auth
+  const session = await getActiveSession();
+  if (!session || !session.token || !session.sessionSecret) return;
+
   try {
     const res = await fetch('/api/batch-locations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ locations: items }),
+      body: JSON.stringify({
+        token: session.token,
+        sessionSecret: session.sessionSecret,
+        locations: items.map(i => ({
+          lat: i.lat, lng: i.lng, accuracy: i.accuracy,
+          speed: i.speed, heading: i.heading,
+          battery: i.battery, network: i.network, ts: i.ts || i.bufferedAt,
+        })),
+      }),
     });
     if (res.ok) await clearBuffer();
   } catch {}
 }
-
-// ── Notification click handler (brings app to foreground) ──
-self.addEventListener('notificationclick', (e) => {
-  e.notification.close();
-  e.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(clientList => {
-      for (const client of clientList) {
-        if (client.url.includes('/') && 'focus' in client) return client.focus();
-      }
-      if (clients.openWindow) return clients.openWindow('/');
-    })
-  );
-});

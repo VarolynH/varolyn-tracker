@@ -17,6 +17,7 @@ const jwt        = require('jsonwebtoken');
 const bcrypt     = require('bcryptjs');
 const path       = require('path');
 const fs         = require('fs');
+const webpush    = require('web-push');
 const { GPSKalmanFilter } = require('./kalman');
 
 // ═══════════════════════════════════════════════════════
@@ -31,6 +32,14 @@ const ENC_KEY    = Buffer.from(
 const ADMIN_EMAIL    = process.env.ADMIN_EMAIL    || 'admin@varolynhealthcare.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
 const ZOHO_WEBHOOK   = process.env.ZOHO_CRM_WEBHOOK_URL || '';
+
+// VAPID keys for Web Push notifications
+const VAPID_PUBLIC  = process.env.VAPID_PUBLIC_KEY  || 'BKEnZ7lQJoAtgBeIBHJM--OIDZTAxnic11UQm9S7WXaUOfI818AFdPaBQEzAVGBm_kySxp9TQwKV_O-1rh8Uobs';
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || 'CXDM4Rs-D_H8uqntQ_hBqb90TCbGZ_dMFs5UhSwPGfA';
+webpush.setVapidDetails('mailto:' + (process.env.ADMIN_EMAIL || 'admin@varolynhealthcare.com'), VAPID_PUBLIC, VAPID_PRIVATE);
+
+// In-memory push subscription store (keyed by session token)
+const pushSubscriptions = new Map();
 
 // Warn if using default secrets in production
 if (process.env.NODE_ENV === 'production') {
@@ -395,6 +404,74 @@ async function build() {
   // The old /api/stop endpoint has been removed. Admin uses /api/admin/stop-session.
 
   // ═════════════════════════════════════════════════════
+  // ═════════════════════════════════════════════════════
+  //  PUSH SUBSCRIPTION + SESSION RESUME
+  // ═════════════════════════════════════════════════════
+
+  /** GET /api/vapid-public — return VAPID public key for push subscription */
+  app.get('/api/vapid-public', async () => ({ publicKey: VAPID_PUBLIC }));
+
+  /** POST /api/push-subscribe — staff registers push subscription */
+  app.post('/api/push-subscribe', async (req, reply) => {
+    const { token, sessionSecret, subscription } = req.body || {};
+    if (!token || !sessionSecret || !subscription)
+      return reply.code(400).send({ error: 'Missing data' });
+    if (!isValidToken(token))
+      return reply.code(400).send({ error: 'Invalid token' });
+
+    // Verify session ownership
+    const sess = await db.query(
+      `SELECT session_secret FROM tracking_sessions WHERE token=$1 AND status='active'`, [token]);
+    if (sess.rows.length === 0 || !safeCompare(sess.rows[0].session_secret, sessionSecret))
+      return reply.code(404).send({ error: 'Session not found' });
+
+    pushSubscriptions.set(token, subscription);
+    return { success: true };
+  });
+
+  /** GET /api/session-status/:token — check if session is still active (for auto-resume) */
+  app.get('/api/session-status/:token', async (req, reply) => {
+    const { token } = req.params;
+    if (!isValidToken(token)) return reply.code(400).send({ error: 'Invalid token' });
+
+    const { rows } = await db.query(
+      `SELECT status, expires_at FROM tracking_sessions WHERE token=$1`, [token]);
+    if (rows.length === 0) return reply.code(404).send({ error: 'Not found' });
+    return { status: rows[0].status, expiresAt: rows[0].expires_at };
+  });
+
+  /** POST /api/ip-location — IP-based geolocation fallback when GPS unavailable */
+  app.post('/api/ip-location', async (req, reply) => {
+    const { token, sessionSecret } = req.body || {};
+    if (!token || !sessionSecret) return reply.code(400).send({ error: 'Missing data' });
+
+    const sess = await db.query(
+      `SELECT id, session_secret FROM tracking_sessions WHERE token=$1 AND status='active'`, [token]);
+    if (sess.rows.length === 0 || !safeCompare(sess.rows[0].session_secret, sessionSecret))
+      return reply.code(404).send({ error: 'Session not found' });
+
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
+    const geo = await ipGeoLookup(ip);
+
+    if (geo.status !== 'fail' && geo.lat && geo.lon) {
+      // Update session with IP-based location (lower accuracy ~5km)
+      await db.query(
+        `UPDATE tracking_sessions
+         SET last_lat=$1, last_lng=$2, last_accuracy=5000, last_update=NOW(),
+             ip_geo=$3::jsonb
+         WHERE token=$4`,
+        [geo.lat, geo.lon, JSON.stringify(geo), token]);
+
+      await redisPub.publish(`tracking:${token}`, JSON.stringify({
+        type: 'location_update', lat: geo.lat, lng: geo.lon,
+        accuracy: 5000, speed: 0, heading: null,
+        source: 'ip_geolocation', timestamp: Date.now(),
+      }));
+    }
+
+    return { success: true, location: geo.status !== 'fail' ? { lat: geo.lat, lng: geo.lon, city: geo.city, region: geo.regionName } : null };
+  });
+
   //  OFFLINE BUFFER — batch sync when staff comes back online
   // ═════════════════════════════════════════════════════
 
@@ -865,6 +942,54 @@ async function start() {
       await db.query(`DELETE FROM tracking_sessions WHERE status != 'active' AND created_at < NOW() - INTERVAL '48 hours'`);
     } catch {}
   }, 60 * 60_000);
+
+  // ═══════════════════════════════════════════════════════
+  //  OFFLINE DETECTION — push notification to staff who go dark
+  //  Checks every 90s for active sessions with no update for >2 min.
+  //  Sends Web Push notification to wake up the device/browser.
+  // ═══════════════════════════════════════════════════════
+  const pushSentRecently = new Map(); // token → lastPushTime (prevent push spam)
+  setInterval(async () => {
+    try {
+      const { rows } = await db.query(
+        `SELECT token FROM tracking_sessions
+         WHERE status = 'active'
+           AND last_update IS NOT NULL
+           AND last_update < NOW() - INTERVAL '2 minutes'`
+      );
+      for (const row of rows) {
+        const sub = pushSubscriptions.get(row.token);
+        if (!sub) continue;
+
+        // Don't push more than once every 5 minutes per session
+        const lastPush = pushSentRecently.get(row.token) || 0;
+        if (Date.now() - lastPush < 5 * 60 * 1000) continue;
+
+        try {
+          await webpush.sendNotification(sub, JSON.stringify({
+            title: 'Varolyn Healthcare',
+            body: 'Your tracking session lost connection. Tap to resume GPS tracking.',
+            token: row.token,
+            action: 'resume',
+          }));
+          pushSentRecently.set(row.token, Date.now());
+          console.log(`[PUSH] Sent recovery notification for session ${row.token}`);
+        } catch (pushErr) {
+          // 410 Gone = subscription expired, clean up
+          if (pushErr.statusCode === 410 || pushErr.statusCode === 404) {
+            pushSubscriptions.delete(row.token);
+          }
+          console.warn(`[PUSH] Failed for ${row.token}:`, pushErr.message);
+        }
+      }
+      // Clean up old push timestamps
+      for (const [tok, ts] of pushSentRecently) {
+        if (Date.now() - ts > 30 * 60 * 1000) pushSentRecently.delete(tok);
+      }
+    } catch (e) {
+      console.warn('[OFFLINE-DETECT] Error:', e.message);
+    }
+  }, 90_000);
 
   const shutdown = async () => {
     await server.close(); await redisPub.quit(); await redisSub.quit(); await db.end(); process.exit(0);

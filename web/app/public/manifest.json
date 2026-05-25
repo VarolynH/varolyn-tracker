@@ -1,16 +1,27 @@
 {
-  "name": "Varolyn Healthcare",
+  "name": "Varolyn Healthcare Tracker",
   "short_name": "Varolyn",
-  "description": "Live Location Sharing for Healthcare",
+  "description": "Live Location Tracking for Healthcare Staff",
   "start_url": "/",
+  "scope": "/",
   "display": "standalone",
+  "orientation": "portrait",
   "background_color": "#ffffff",
   "theme_color": "#0d9488",
+  "categories": ["medical", "health", "business"],
+  "prefer_related_applications": false,
   "icons": [
     {
       "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏥</text></svg>",
       "sizes": "any",
-      "type": "image/svg+xml"
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
     }
+  ],
+  "permissions": [
+    "geolocation",
+    "notifications",
+    "background-sync",
+    "periodic-background-sync"
   ]
 }

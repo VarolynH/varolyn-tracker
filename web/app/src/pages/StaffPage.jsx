@@ -186,6 +186,68 @@ async function collectDeviceInfo() {
 //  MAIN COMPONENT
 // ═══════════════════════════════════════════════════════
 
+// ── Session persistence keys ──
+const SESSION_STORAGE_KEY = 'varolyn_active_session';
+
+function saveSession(data) {
+  try { localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(data)); } catch {}
+}
+function loadSession() {
+  try { const s = localStorage.getItem(SESSION_STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; }
+}
+function clearSession() {
+  try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch {}
+}
+
+/** Subscribe to Web Push notifications */
+async function subscribeToPush(tok, secret) {
+  try {
+    const reg = await navigator.serviceWorker?.ready;
+    if (!reg || !('pushManager' in reg)) return;
+
+    // Get VAPID public key from server
+    const vapidRes = await fetch(`${API}/api/vapid-public`);
+    if (!vapidRes.ok) return;
+    const { publicKey } = await vapidRes.json();
+
+    // Convert base64url to Uint8Array
+    const padding = '='.repeat((4 - publicKey.length % 4) % 4);
+    const base64 = (publicKey + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    const key = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) key[i] = raw.charCodeAt(i);
+
+    // Subscribe
+    const sub = await reg.pushManager.subscribe({
+      userVisibleNotification: true,
+      applicationServerKey: key,
+    });
+
+    // Send subscription to server
+    await fetch(`${API}/api/push-subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tok, sessionSecret: secret, subscription: sub.toJSON() }),
+    });
+  } catch (e) { console.warn('[PUSH] Subscribe failed:', e.message); }
+}
+
+/** IP geolocation fallback when GPS unavailable */
+async function ipLocationFallback(tok, secret) {
+  try {
+    const res = await fetch(`${API}/api/ip-location`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tok, sessionSecret: secret }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.location || null;
+    }
+  } catch {}
+  return null;
+}
+
 export default function StaffPage() {
   const [name, setName]       = useState('');
   const [phone, setPhone]     = useState('');
@@ -199,6 +261,7 @@ export default function StaffPage() {
   const [stoppedByAdmin, setStoppedByAdmin] = useState(false);
   const [error, setError]           = useState('');
   const [loading, setLoading]       = useState(false);
+  const [resuming, setResuming]     = useState(false);
 
   const wsRef        = useRef(null);
   const watchRef     = useRef(null);
@@ -209,18 +272,79 @@ export default function StaffPage() {
   const videoKeepRef = useRef(null);
   const isLiveRef    = useRef(false);
   const bufferCountRef = useRef(0);
+  const ipFallbackRef = useRef(null);
+  const gpsFailCountRef = useRef(0);
 
   const [gpsInfo, setGpsInfo]         = useState(null);
   const [wsStatus, setWsStatus]       = useState('disconnected');
   const [elapsed, setElapsed]         = useState(0);
   const [bufferedCount, setBuffered]  = useState(0);
   const [bgMode, setBgMode]           = useState(false);
+  const [gpsSource, setGpsSource]     = useState('gps'); // 'gps' | 'ip'
   const startTimeRef = useRef(null);
 
   // Keep refs in sync
   useEffect(() => { secretRef.current = sessionSecret; }, [sessionSecret]);
   useEffect(() => { tokenRef.current = token; }, [token]);
   useEffect(() => { isLiveRef.current = isLive; }, [isLive]);
+
+  // ═════════════════════════════════════════════════════
+  //  AUTO-RESUME — check localStorage for active session on mount
+  // ═════════════════════════════════════════════════════
+  useEffect(() => {
+    const saved = loadSession();
+    if (!saved || !saved.token || !saved.sessionSecret) return;
+
+    setResuming(true);
+    // Check if session is still active on server
+    fetch(`${API}/api/session-status/${saved.token}`)
+      .then(r => r.json())
+      .then(async (data) => {
+        if (data.status === 'active') {
+          // Session still alive — resume tracking
+          setToken(saved.token);
+          setSecret(saved.sessionSecret);
+          setName(saved.name || '');
+          setDesignation(saved.designation || '');
+          setIsLive(true);
+          setStoppedByAdmin(false);
+          // Calculate elapsed from saved start time
+          if (saved.startedAt) {
+            startTimeRef.current = saved.startedAt;
+          }
+          await OfflineBuffer.clear();
+          startGPS(saved.token);
+          connectWS(saved.token, saved.sessionSecret);
+          await startAllKeepAlives();
+          // Re-subscribe to push (in case SW was re-registered)
+          subscribeToPush(saved.token, saved.sessionSecret);
+          // Tell SW about active session for background recovery
+          if (navigator.serviceWorker?.controller) {
+            navigator.serviceWorker.controller.postMessage({
+              type: 'SET_SESSION',
+              data: { token: saved.token, sessionSecret: saved.sessionSecret },
+            });
+          }
+        } else {
+          // Session ended while we were away
+          clearSession();
+          if (data.status === 'stopped') setStoppedByAdmin(true);
+        }
+      })
+      .catch(() => {
+        // Network error — still try to resume, buffer offline
+        setToken(saved.token);
+        setSecret(saved.sessionSecret);
+        setName(saved.name || '');
+        setDesignation(saved.designation || '');
+        setIsLive(true);
+        if (saved.startedAt) startTimeRef.current = saved.startedAt;
+        startGPS(saved.token);
+        connectWS(saved.token, saved.sessionSecret);
+        startAllKeepAlives();
+      })
+      .finally(() => setResuming(false));
+  }, []);
 
   // ── Elapsed timer ─────────────────────────────────────
   useEffect(() => {
@@ -382,10 +506,25 @@ export default function StaffPage() {
     return () => clearInterval(id);
   }, [isLive]);
 
-  // ── Register Service Worker ──
+  // ── Register Service Worker + listen for push resume ──
   useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
+
+      // Listen for SW messages (push resume, etc.)
+      const swHandler = (e) => {
+        if (e.data?.type === 'PUSH_RESUME') {
+          // Push notification clicked — if we have a saved session, trigger resume
+          if (!isLiveRef.current) {
+            const saved = loadSession();
+            if (saved?.token) {
+              window.location.reload(); // Simplest: reload triggers auto-resume logic
+            }
+          }
+        }
+      };
+      navigator.serviceWorker.addEventListener('message', swHandler);
+      return () => navigator.serviceWorker.removeEventListener('message', swHandler);
     }
   }, []);
 
@@ -421,10 +560,32 @@ export default function StaffPage() {
       setSecret(data.sessionSecret);
       setIsLive(true);
       setStoppedByAdmin(false);
+      startTimeRef.current = Date.now();
       await OfflineBuffer.clear();
+
+      // Persist session for auto-resume across tab close / phone restart
+      saveSession({
+        token: data.token,
+        sessionSecret: data.sessionSecret,
+        name: name.trim(),
+        designation: designation.trim(),
+        startedAt: Date.now(),
+      });
+
       startGPS(data.token);
       connectWS(data.token, data.sessionSecret);
       await startAllKeepAlives();
+
+      // Subscribe to push notifications for offline recovery
+      subscribeToPush(data.token, data.sessionSecret);
+
+      // Tell SW about this session
+      if (navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.controller.postMessage({
+          type: 'SET_SESSION',
+          data: { token: data.token, sessionSecret: data.sessionSecret },
+        });
+      }
     } catch (e) { setError(e.message); }
     finally { setLoading(false); }
   };
@@ -434,13 +595,20 @@ export default function StaffPage() {
   // ═════════════════════════════════════════════════════
   const handleAdminStop = useCallback(() => {
     if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
+    if (ipFallbackRef.current) { clearInterval(ipFallbackRef.current); ipFallbackRef.current = null; }
     wsRef.current = null;
     stopAllKeepAlives();
+    clearSession(); // Remove from localStorage so auto-resume won't trigger
+    // Tell SW to clear session
+    if (navigator.serviceWorker?.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_SESSION' });
+    }
     setIsLive(false);
     setStoppedByAdmin(true);
     setGpsInfo(null);
     setWsStatus('disconnected');
     setBgMode(false);
+    setGpsSource('gps');
   }, []);
 
   // ═════════════════════════════════════════════════════
@@ -450,6 +618,14 @@ export default function StaffPage() {
     if (!navigator.geolocation) return setError('GPS not supported');
     watchRef.current = navigator.geolocation.watchPosition(
       async (pos) => {
+        // GPS working — cancel IP fallback if active
+        gpsFailCountRef.current = 0;
+        if (ipFallbackRef.current) {
+          clearInterval(ipFallbackRef.current);
+          ipFallbackRef.current = null;
+          setGpsSource('gps');
+        }
+
         const loc = {
           lat: pos.coords.latitude, lng: pos.coords.longitude,
           accuracy: pos.coords.accuracy, speed: pos.coords.speed,
@@ -493,7 +669,26 @@ export default function StaffPage() {
           });
         }
       },
-      (err) => setError(`GPS error: ${err.message}`),
+      async (err) => {
+        gpsFailCountRef.current++;
+        // After 3 consecutive GPS failures, fall back to IP geolocation
+        if (gpsFailCountRef.current >= 3 && !ipFallbackRef.current) {
+          setGpsSource('ip');
+          // Start IP fallback interval (every 30s)
+          const runIpFallback = async () => {
+            const loc = await ipLocationFallback(tokenRef.current, secretRef.current);
+            if (loc) {
+              setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null });
+              setError('');
+            }
+          };
+          runIpFallback();
+          ipFallbackRef.current = setInterval(runIpFallback, 30000);
+        }
+        if (gpsFailCountRef.current < 3) {
+          setError(`GPS error: ${err.message} — retrying...`);
+        }
+      },
       { enableHighAccuracy: true, maximumAge: 3000, timeout: 20000 },
     );
   }, []);
@@ -546,6 +741,7 @@ export default function StaffPage() {
   useEffect(() => () => {
     if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
     if (wsRef.current) wsRef.current.close();
+    if (ipFallbackRef.current) clearInterval(ipFallbackRef.current);
     stopAllKeepAlives();
   }, []);
 
@@ -575,9 +771,25 @@ export default function StaffPage() {
             <p>Your tracking session has been stopped by the admin. Thank you for your service.</p>
             <p className="stopped-detail">You tracked for <strong>{fmtElapsed(elapsed)}</strong></p>
           </div>
-          <button className="btn btn-primary" onClick={() => { setStoppedByAdmin(false); setToken(null); setSecret(null); setElapsed(0); }} style={{ marginTop: 24 }}>
+          <button className="btn btn-primary" onClick={() => { clearSession(); setStoppedByAdmin(false); setToken(null); setSecret(null); setElapsed(0); setResuming(false); }} style={{ marginTop: 24 }}>
             Start New Session
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ═════════════════════════════════════════════════════
+  //  RENDER: Resuming
+  // ═════════════════════════════════════════════════════
+  if (resuming) {
+    return (
+      <div className="page">
+        <div className="brand"><h1>Varolyn Healthcare</h1><p>Live Location Tracking</p></div>
+        <div className="card" style={{ textAlign: 'center', padding: '40px 20px' }}>
+          <div className="pulse-dot" style={{ width: 20, height: 20, margin: '0 auto 16px' }} />
+          <h3 style={{ margin: 0, color: 'var(--teal)' }}>Resuming Session...</h3>
+          <p style={{ color: '#64748b', marginTop: 8 }}>Reconnecting to your active tracking session</p>
         </div>
       </div>
     );
@@ -672,8 +884,9 @@ export default function StaffPage() {
 
         {gpsInfo && (
           <div className="gps-debug">
-            GPS: {gpsInfo.lat.toFixed(6)}, {gpsInfo.lng.toFixed(6)}<br />
+            {gpsSource === 'ip' ? 'IP Location' : 'GPS'}: {gpsInfo.lat.toFixed(6)}, {gpsInfo.lng.toFixed(6)}<br />
             Accuracy: {gpsInfo.accuracy?.toFixed(0)}m
+            {gpsSource === 'ip' && <> | <span style={{color:'#f59e0b'}}>Approximate (IP-based)</span></>}
             {gpsInfo.speed != null && gpsInfo.speed > 0 && <> | Speed: {(gpsInfo.speed * 3.6).toFixed(1)} km/h</>}
           </div>
         )}
