@@ -227,11 +227,13 @@ async function build() {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'", "'unsafe-inline'"],
+        scriptSrc: ["'self'", "'unsafe-inline'", "'unsafe-eval'"],
         styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", 'data:', 'https://tile.openstreetmap.org', 'https://*.tile.openstreetmap.org'],
-        connectSrc: ["'self'", 'ws:', 'wss:', 'http://ip-api.com'],
-        fontSrc: ["'self'"],
+        imgSrc: ["'self'", 'data:', 'blob:', 'https://*.openstreetmap.org', 'https://tile.openstreetmap.org', 'https://*.tile.openstreetmap.org'],
+        connectSrc: ["'self'", 'ws:', 'wss:', 'http://ip-api.com', 'https://*.openstreetmap.org', 'https://tile.openstreetmap.org', 'https://*.tile.openstreetmap.org'],
+        workerSrc: ["'self'", 'blob:'],
+        childSrc: ["'self'", 'blob:'],
+        fontSrc: ["'self'", 'data:'],
         frameSrc: ["'none'"],
       },
     },
