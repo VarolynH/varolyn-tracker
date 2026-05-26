@@ -958,6 +958,181 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════ */
+/*  PERMISSION GATE — Zomato/Uber style enforcement        */
+/* ═══════════════════════════════════════════════════════ */
+
+/* Permission checking spinner */
+.perm-gate-header { text-align: center; padding: 16px 0; }
+.perm-gate-spinner {
+  width: 40px; height: 40px; margin: 0 auto;
+  border: 4px solid var(--gray-200);
+  border-top-color: var(--teal);
+  border-radius: 50%;
+  animation: perm-spin 1s linear infinite;
+}
+@keyframes perm-spin { to { transform: rotate(360deg); } }
+
+/* Permission checklist */
+.perm-checklist {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 16px; background: var(--gray-50);
+  border-radius: var(--radius); margin-top: 16px;
+}
+.perm-item {
+  display: flex; align-items: center; gap: 10px;
+  font-size: .9rem; padding: 8px 12px;
+  background: #fff; border-radius: 8px;
+  border: 1px solid var(--gray-200);
+}
+.perm-item span { font-weight: 500; }
+
+/* Permission failed */
+.perm-fail-box {
+  text-align: center; padding: 20px;
+  background: #fef2f2; border-radius: var(--radius);
+  border: 2px solid #fecaca;
+}
+.perm-fail-icon { font-size: 2.5rem; }
+.perm-fix-instructions {
+  text-align: left; background: #fffbeb;
+  border-radius: 8px; padding: 12px 16px;
+  margin-top: 12px; border: 1px solid #fde68a;
+}
+
+/* Device detection banner */
+.device-detect-banner {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 16px; background: var(--teal-lt);
+  border-radius: var(--radius); margin-bottom: 16px;
+  border: 1px solid #99f6e4;
+}
+.device-detect-icon { font-size: 1.6rem; }
+
+/* Device settings warning */
+.device-settings-warning {
+  background: #fef2f2; border: 2px solid #fecaca;
+  border-radius: var(--radius); padding: 12px 16px;
+  margin-bottom: 16px; text-align: center;
+}
+.device-settings-warning strong {
+  color: #dc2626; font-size: .9rem;
+  display: block; margin-bottom: 4px;
+}
+.device-settings-warning p {
+  color: #7f1d1d; font-size: .8rem; margin: 0; line-height: 1.5;
+}
+
+/* Device setting block */
+.device-setting-block {
+  border: 2px solid #fde68a; border-radius: var(--radius);
+  padding: 14px; margin-bottom: 14px;
+  background: #fffbeb; transition: all .3s ease;
+}
+.device-setting-block.setting-done {
+  border-color: #86efac; background: #f0fdf4;
+}
+.device-setting-block.setting-optional {
+  border-color: var(--gray-200); background: var(--gray-50);
+}
+.device-setting-block.setting-optional.setting-done {
+  border-color: #86efac; background: #f0fdf4;
+}
+
+.setting-header {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-bottom: 10px;
+}
+.setting-number {
+  flex-shrink: 0;
+  width: 26px; height: 26px;
+  background: var(--teal); color: #fff;
+  border-radius: 50%; display: flex;
+  align-items: center; justify-content: center;
+  font-weight: 700; font-size: .8rem;
+}
+.setting-title {
+  margin: 0; font-size: .88rem; color: var(--gray-800);
+}
+.setting-subtitle {
+  margin: 2px 0 0; font-size: .75rem; color: #64748b;
+}
+.setting-check {
+  margin-left: auto; font-size: 1.2rem; flex-shrink: 0;
+}
+
+/* Guide steps */
+.device-guide-steps {
+  list-style: none; padding: 0; margin: 8px 0;
+}
+.device-guide-steps li {
+  position: relative; padding: 6px 8px 6px 20px;
+  font-size: .8rem; color: #44403c; line-height: 1.5;
+  counter-increment: guide-step;
+}
+.device-guide-steps li::before {
+  content: counter(guide-step) ".";
+  position: absolute; left: 0; font-weight: 700;
+  color: var(--teal);
+}
+.guide-step.guide-bold { font-weight: 600; }
+.guide-step.guide-critical {
+  background: #fef2f2; border-radius: 6px;
+  border-left: 3px solid #ef4444; padding-left: 18px;
+  margin: 2px 0;
+}
+.guide-required-tag {
+  display: inline-block; font-size: .65rem;
+  background: #ef4444; color: #fff;
+  padding: 1px 6px; border-radius: 4px;
+  margin-left: 6px; font-weight: 700;
+  vertical-align: middle;
+}
+
+.setting-sub {
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed #d6d3d1;
+}
+
+/* Setting confirmation checkbox */
+.setting-confirm {
+  display: flex; align-items: flex-start; gap: 8px;
+  margin-top: 10px; padding: 8px 12px;
+  background: #fff; border-radius: 8px;
+  border: 1px solid var(--gray-200);
+  cursor: pointer; user-select: none;
+}
+.setting-confirm input[type="checkbox"] {
+  margin-top: 2px; width: 18px; height: 18px;
+  accent-color: var(--teal); flex-shrink: 0;
+  cursor: pointer;
+}
+.setting-confirm span {
+  font-size: .8rem; color: var(--gray-800);
+  font-weight: 500; line-height: 1.4;
+}
+
+/* Permission status summary */
+.perm-status-summary {
+  background: #f0fdf4; border: 1px solid #86efac;
+  border-radius: var(--radius); padding: 12px;
+  margin-top: 12px;
+}
+.perm-status-summary h4 { color: var(--teal); }
+.perm-mini-grid {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-top: 6px;
+}
+.perm-mini {
+  font-size: .75rem; padding: 3px 8px;
+  border-radius: 6px; font-weight: 500;
+}
+.perm-mini.ok { background: #dcfce7; color: #166534; }
+.perm-mini.fail { background: #fef2f2; color: #dc2626; }
+
+/* WiFi/cell source indicator */
+.tstat-wifi { color: #d97706; }
+
+/* ═══════════════════════════════════════════════════════ */
 /*  RESPONSIVE                                             */
 /* ═══════════════════════════════════════════════════════ */
 @media (max-width: 640px) {
@@ -966,4 +1141,6 @@ body {
   .dash-grid { grid-template-columns: 1fr; }
   .tracking-stats { grid-template-columns: 1fr; }
   .duration-grid { grid-template-columns: repeat(2, 1fr); }
+  .perm-mini-grid { gap: 4px; }
+  .device-setting-block { padding: 10px; }
 }

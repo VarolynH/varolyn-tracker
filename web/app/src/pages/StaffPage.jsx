@@ -345,6 +345,285 @@ function saveSession(data) { try { localStorage.setItem(SESSION_STORAGE_KEY, JSO
 function loadSession() { try { const s = localStorage.getItem(SESSION_STORAGE_KEY); return s ? JSON.parse(s) : null; } catch { return null; } }
 function clearSession() { try { localStorage.removeItem(SESSION_STORAGE_KEY); } catch {} }
 
+// ═══════════════════════════════════════════════════════
+//  DEVICE DETECTION — Identify exact phone manufacturer, OS, browser
+//  Like Zomato/Uber: know the device, show exact settings path
+// ═══════════════════════════════════════════════════════
+function detectDevice() {
+  const ua = (navigator.userAgent || '').toLowerCase();
+  let os = 'unknown', manufacturer = 'unknown', browser = 'unknown';
+  if (/iphone|ipad|ipod/.test(ua)) os = 'ios';
+  else if (/android/.test(ua)) os = 'android';
+  else if (/windows phone/.test(ua)) os = 'windows-phone';
+  else if (/windows/.test(ua)) os = 'windows';
+  else if (/linux/.test(ua)) os = 'linux';
+  else if (/mac/.test(ua)) os = 'macos';
+
+  if (os === 'android') {
+    if (/samsung|sm-|gt-/.test(ua)) manufacturer = 'samsung';
+    else if (/xiaomi|redmi|poco|miui|mi /.test(ua)) manufacturer = 'xiaomi';
+    else if (/oneplus|one plus/.test(ua)) manufacturer = 'oneplus';
+    else if (/huawei|honor|hry|yal|els/.test(ua)) manufacturer = 'huawei';
+    else if (/oppo|cph|peh/.test(ua)) manufacturer = 'oppo';
+    else if (/realme|rmx/.test(ua)) manufacturer = 'realme';
+    else if (/vivo/.test(ua)) manufacturer = 'vivo';
+    else if (/google|pixel|nexus/.test(ua)) manufacturer = 'google';
+    else if (/motorola|moto /.test(ua)) manufacturer = 'motorola';
+    else if (/nokia|hmd/.test(ua)) manufacturer = 'nokia';
+    else if (/asus|rog/.test(ua)) manufacturer = 'asus';
+    else if (/lenovo/.test(ua)) manufacturer = 'lenovo';
+    else if (/nothing/.test(ua)) manufacturer = 'nothing';
+    else if (/infinix/.test(ua)) manufacturer = 'infinix';
+    else if (/tecno/.test(ua)) manufacturer = 'tecno';
+    else if (/itel/.test(ua)) manufacturer = 'itel';
+    else if (/lava/.test(ua)) manufacturer = 'lava';
+    else if (/micromax/.test(ua)) manufacturer = 'micromax';
+    else manufacturer = 'android-generic';
+  } else if (os === 'ios') { manufacturer = 'apple'; }
+
+  if (/samsungbrowser/.test(ua)) browser = 'samsung-internet';
+  else if (/brave/.test(ua)) browser = 'brave';
+  else if (/edg/.test(ua)) browser = 'edge';
+  else if (/opr|opera/.test(ua)) browser = 'opera';
+  else if (/firefox|fxios/.test(ua)) browser = 'firefox';
+  else if (/crios/.test(ua)) browser = 'chrome';
+  else if (/chrome/.test(ua) && !/edg/.test(ua)) browser = 'chrome';
+  else if (/safari/.test(ua) && !/chrome/.test(ua)) browser = 'safari';
+  else browser = 'other';
+
+  return { os, manufacturer, browser };
+}
+
+/** Device-specific settings guide — exact paths like Zomato/Uber delivery app */
+function getDeviceGuide(device) {
+  const bn = device.browser === 'chrome' ? 'Chrome' :
+    device.browser === 'samsung-internet' ? 'Samsung Internet' :
+    device.browser === 'firefox' ? 'Firefox' :
+    device.browser === 'edge' ? 'Edge' :
+    device.browser === 'brave' ? 'Brave' :
+    device.browser === 'opera' ? 'Opera' : 'Browser';
+
+  const g = { battery: [], autostart: [], background: [], location: [], notification: [], dnd: [], dataSaver: [] };
+
+  if (device.os === 'android') {
+    // ── LOCATION ──
+    g.location = [
+      { text: `Open phone Settings`, bold: true },
+      { text: `Go to "Location" → "App permissions"` },
+      { text: `Find "${bn}" → Select "Allow all the time"`, bold: true, critical: true },
+      { text: `Enable "Use precise location" toggle`, bold: true, critical: true },
+    ];
+
+    // ── NOTIFICATION ──
+    g.notification = [
+      { text: `Settings → Apps → "${bn}" → Notifications`, bold: true },
+      { text: `Enable "Allow notifications"`, critical: true },
+      { text: `Enable ALL notification categories (don't leave any off)` },
+    ];
+
+    // ── DATA SAVER ──
+    g.dataSaver = [
+      { text: `Settings → Network → Data Saver` },
+      { text: `If Data Saver is ON: Add "${bn}" to "Unrestricted data" list`, critical: true },
+    ];
+
+    // ── MANUFACTURER-SPECIFIC ──
+    if (device.manufacturer === 'samsung') {
+      g.battery = [
+        { text: `Settings → Apps → "${bn}" → Battery`, bold: true },
+        { text: `Select "Unrestricted"`, bold: true, critical: true },
+        { text: `Go back: Settings → Battery and device care → Battery` },
+        { text: `Tap "Background usage limits"` },
+        { text: `Remove "${bn}" from "Sleeping apps"`, critical: true },
+        { text: `Remove "${bn}" from "Deep sleeping apps"`, critical: true },
+        { text: `Turn OFF "Adaptive battery" (optional but recommended)` },
+      ];
+      g.autostart = [
+        { text: `Samsung auto-manages apps. Just ensure ${bn} is NOT in sleeping apps list above.` },
+      ];
+      g.background = [
+        { text: `Settings → Apps → "${bn}" → Mobile data`, bold: true },
+        { text: `Enable "Allow background data usage"`, critical: true },
+        { text: `Enable "Allow data usage while Data saver is on"`, critical: true },
+      ];
+    } else if (device.manufacturer === 'xiaomi') {
+      g.battery = [
+        { text: `Settings → Apps → Manage apps → "${bn}"`, bold: true },
+        { text: `Tap "Battery saver" → Select "No restrictions"`, bold: true, critical: true },
+        { text: `Also: Settings → Battery & performance` },
+        { text: `Tap gear icon → App battery saver → "${bn}" → No restrictions` },
+      ];
+      g.autostart = [
+        { text: `Settings → Apps → Manage apps → "${bn}"`, bold: true },
+        { text: `Enable "Autostart" toggle`, bold: true, critical: true },
+        { text: `Also: Settings → Permissions → Autostart → Enable "${bn}"` },
+      ];
+      g.background = [
+        { text: `Settings → Apps → Manage apps → "${bn}"`, bold: true },
+        { text: `Enable "Allow background activity"`, critical: true },
+        { text: `Lock app in recent apps: Open ${bn}, swipe down on its card in recent apps to lock it` },
+      ];
+    } else if (device.manufacturer === 'oneplus') {
+      g.battery = [
+        { text: `Settings → Battery → Battery optimization`, bold: true },
+        { text: `Find "${bn}" → Select "Don't optimize"`, bold: true, critical: true },
+        { text: `Also: Settings → Battery → Advanced → Optimize battery use` },
+        { text: `Disable optimization for "${bn}"` },
+      ];
+      g.autostart = [
+        { text: `Settings → Apps → App management → "${bn}"`, bold: true },
+        { text: `Enable "Auto-launch"`, critical: true },
+      ];
+      g.background = [
+        { text: `Settings → Apps → App management → "${bn}"`, bold: true },
+        { text: `Enable "Allow background activity"`, critical: true },
+      ];
+    } else if (device.manufacturer === 'huawei') {
+      g.battery = [
+        { text: `Settings → Battery → App launch`, bold: true },
+        { text: `Find "${bn}" → Toggle OFF automatic management`, bold: true, critical: true },
+        { text: `Turn ON all three: Auto-launch, Secondary launch, Run in background`, bold: true, critical: true },
+      ];
+      g.autostart = [
+        { text: `Covered in Battery settings above — enable "Auto-launch" for "${bn}"` },
+      ];
+      g.background = [
+        { text: `Covered in Battery settings above — enable "Run in background" for "${bn}"` },
+      ];
+    } else if (device.manufacturer === 'oppo') {
+      g.battery = [
+        { text: `Settings → Battery → More battery settings`, bold: true },
+        { text: `"Optimize battery use" → "${bn}" → Don't optimize`, critical: true },
+        { text: `Also: Settings → Battery → Energy Saver → disable for "${bn}"` },
+      ];
+      g.autostart = [
+        { text: `Settings → App management → "${bn}" → Auto-start → Enable`, bold: true, critical: true },
+        { text: `Also: Settings → Privacy → Startup manager → Enable "${bn}"` },
+      ];
+      g.background = [
+        { text: `Settings → App management → "${bn}" → Allow background activity`, critical: true },
+      ];
+    } else if (device.manufacturer === 'realme') {
+      g.battery = [
+        { text: `Settings → Battery → More battery settings`, bold: true },
+        { text: `"Optimize battery use" → "${bn}" → Don't optimize`, critical: true },
+      ];
+      g.autostart = [
+        { text: `Settings → App management → "${bn}" → Auto-start → Enable`, bold: true, critical: true },
+        { text: `Also check: Settings → App management → Startup manager` },
+      ];
+      g.background = [
+        { text: `Settings → App management → "${bn}" → Allow background activity`, critical: true },
+      ];
+    } else if (device.manufacturer === 'vivo') {
+      g.battery = [
+        { text: `Settings → Battery → Background power consumption management`, bold: true },
+        { text: `Find "${bn}" → Select "Don't restrict"`, critical: true },
+        { text: `Also: Settings → Battery → High background power consumption → Allow "${bn}"` },
+      ];
+      g.autostart = [
+        { text: `Settings → More settings → Applications → Autostart`, bold: true },
+        { text: `Enable "${bn}"`, critical: true },
+        { text: `Also: i Manager → App manager → Autostart manager → Enable "${bn}"` },
+      ];
+      g.background = [
+        { text: `Settings → Apps → "${bn}" → Allow background activity`, critical: true },
+      ];
+    } else if (device.manufacturer === 'google' || device.manufacturer === 'motorola' || device.manufacturer === 'nokia' || device.manufacturer === 'nothing') {
+      g.battery = [
+        { text: `Settings → Apps → "${bn}" → Battery`, bold: true },
+        { text: `Select "Unrestricted"`, bold: true, critical: true },
+        { text: `Also: Settings → Battery → Adaptive Battery → turn OFF (optional)` },
+      ];
+      g.autostart = [{ text: `Stock Android: No autostart setting needed.` }];
+      g.background = [
+        { text: `Settings → Apps → "${bn}" → Mobile data & Wi-Fi`, bold: true },
+        { text: `Enable "Background data"`, critical: true },
+      ];
+    } else {
+      // Generic Android
+      g.battery = [
+        { text: `Settings → Apps → "${bn}" → Battery`, bold: true },
+        { text: `Select "Unrestricted" or "Don't optimize"`, bold: true, critical: true },
+        { text: `Settings → Battery → Battery optimization → "${bn}" → Don't optimize` },
+      ];
+      g.autostart = [
+        { text: `Check Settings → Apps → "${bn}" for any "Autostart" toggle` },
+        { text: `If available, enable it` },
+      ];
+      g.background = [
+        { text: `Settings → Apps → "${bn}" → Mobile data`, bold: true },
+        { text: `Enable "Background data"`, critical: true },
+      ];
+    }
+
+    // ── DND ──
+    g.dnd = [
+      { text: `Settings → Sound → Do Not Disturb → Apps` },
+      { text: `Add "${bn}" as an exception so notifications still come through` },
+    ];
+
+  } else if (device.os === 'ios') {
+    g.location = [
+      { text: `Open Settings → Privacy & Security → Location Services`, bold: true },
+      { text: `Find "${bn}" → Select "Always"`, bold: true, critical: true },
+      { text: `Enable "Precise Location" toggle`, bold: true, critical: true },
+    ];
+    g.notification = [
+      { text: `Settings → Notifications → "${bn}"`, bold: true },
+      { text: `Enable "Allow Notifications"`, critical: true },
+      { text: `Set "Banner Style" to "Persistent"` },
+      { text: `Enable "Time Sensitive Notifications" if available` },
+    ];
+    g.battery = [
+      { text: `Settings → Battery → Low Power Mode`, bold: true },
+      { text: `Turn OFF Low Power Mode while tracking`, critical: true },
+      { text: `Note: iOS manages battery automatically for background apps` },
+    ];
+    g.background = [
+      { text: `Settings → General → Background App Refresh`, bold: true },
+      { text: `Enable Background App Refresh for "${bn}"`, bold: true, critical: true },
+      { text: `Ensure Wi-Fi & Cellular Data is selected (not Wi-Fi only)` },
+    ];
+    g.autostart = [{ text: `iOS handles auto-start automatically. No action needed.` }];
+    g.dnd = [
+      { text: `Settings → Focus → Do Not Disturb` },
+      { text: `Under "Allowed Apps", add "${bn}"`, critical: true },
+    ];
+    g.dataSaver = [
+      { text: `Settings → Cellular → "${bn}"` },
+      { text: `Enable cellular data for "${bn}"`, critical: true },
+    ];
+
+  } else {
+    // Desktop / Linux / other
+    g.location = [{ text: `Allow location access when browser prompts`, bold: true }];
+    g.notification = [{ text: `Allow notification access when browser prompts`, bold: true }];
+    g.battery = [{ text: `Disable power saving / sleep mode while tracking`, bold: true }];
+    g.background = [{ text: `Keep the browser window open (can be minimized)` }];
+    g.autostart = [];
+    g.dnd = [];
+    g.dataSaver = [];
+  }
+
+  return g;
+}
+
+/** Low-accuracy geolocation (WiFi triangulation + Cell tower) — browser handles this internally */
+async function getWifiCellLocation(timeout = 10000) {
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve({
+        lat: pos.coords.latitude, lng: pos.coords.longitude,
+        accuracy: pos.coords.accuracy, speed: pos.coords.speed,
+        heading: pos.coords.heading, source: 'wifi-cell',
+      }),
+      () => resolve(null),
+      { enableHighAccuracy: false, maximumAge: 30000, timeout } // LOW accuracy = WiFi + Cell towers
+    );
+  });
+}
+
 /** Subscribe to Web Push */
 async function subscribeToPush(tok, secret) {
   try {
@@ -419,6 +698,20 @@ export default function StaffPage() {
   const [selfCheckStatus, setSelfCheckStatus] = useState(null);
   const startTimeRef = useRef(null);
 
+  // ── PERMISSION GATE STATE (Zomato/Uber style) ──
+  const [permPhase, setPermPhase] = useState(null); // null | 'checking' | 'failed' | 'device-settings' | 'ready'
+  const [permChecks, setPermChecks] = useState({
+    location: 'pending', notification: 'pending', serviceWorker: 'pending',
+    wakeLock: 'pending', storage: 'pending', gpsTest: 'pending',
+  });
+  const [permFailReason, setPermFailReason] = useState(null);
+  const [detectedDevice, setDetectedDevice] = useState(null);
+  const [deviceGuide, setDeviceGuide] = useState(null);
+  const [settingsConfirmed, setSettingsConfirmed] = useState({
+    battery: false, autostart: false, background: false, dnd: false, dataSaver: false,
+  });
+  const lowAccuracyWatchRef = useRef(null);
+
   useEffect(() => { secretRef.current = sessionSecret; }, [sessionSecret]);
   useEffect(() => { tokenRef.current = token; }, [token]);
   useEffect(() => { isLiveRef.current = isLive; }, [isLive]);
@@ -484,78 +777,199 @@ export default function StaffPage() {
   };
 
   // ═════════════════════════════════════════════════════
-  //  REQUEST ALL PERMISSIONS UPFRONT
-  //  Notification permission is MANDATORY — without it,
-  //  Android kills Chrome when minimized/closed and tracking dies.
+  //  PERMISSION GATE — AGGRESSIVE LIKE ZOMATO/UBER
+  //  Staff CANNOT start tracking until EVERY permission is verified.
+  //  Each permission is tested, not just requested.
+  //  Device settings are detected and staff must confirm completion.
   // ═════════════════════════════════════════════════════
+
+  /** Quick re-request for auto-resume (doesn't block UI) */
   const requestAllPermissions = async () => {
-    // 1. Notification permission — MANDATORY for background tracking
-    // Android REQUIRES a persistent notification to keep Chrome alive in background
     try {
-      if ('Notification' in window) {
-        if (Notification.permission === 'default') {
-          const result = await Notification.requestPermission();
-          if (result !== 'granted') {
-            setError('Notification permission is REQUIRED for tracking. Please allow notifications and try again.');
-            return false;
-          }
-        } else if (Notification.permission === 'denied') {
-          setError('Notifications are blocked. Go to your browser settings and enable notifications for this site, then try again.');
-          return false;
-        }
+      if ('Notification' in window && Notification.permission === 'default') {
+        await Notification.requestPermission();
       }
     } catch {}
-
-    // 2. Register SW FIRST (needed for push + persistent notification)
     try {
       if ('serviceWorker' in navigator) {
         const reg = await navigator.serviceWorker.register('/sw.js');
         if (reg.waiting) reg.waiting.postMessage({ type: 'SKIPWAITING' });
-        // Wait for SW to be ready
         await navigator.serviceWorker.ready;
       }
     } catch {}
-
-    // 3. Request GPS permission with high accuracy
-    try {
-      await new Promise((resolve) => {
-        navigator.geolocation.getCurrentPosition(resolve, resolve, { enableHighAccuracy: true, timeout: 10000 });
-      });
-    } catch {}
-
-    // 4. Persistent storage (prevents browser from evicting our data)
-    try {
-      if (navigator.storage?.persist) {
-        await navigator.storage.persist();
-      }
-    } catch {}
-
-    // 5. Screen orientation lock
-    try {
-      if (screen.orientation?.lock) {
-        await screen.orientation.lock('portrait-primary').catch(() => {});
-      }
-    } catch {}
-
-    // 6. Request background sync permission
+    try { await new Promise((r) => navigator.geolocation.getCurrentPosition(r, r, { enableHighAccuracy: true, timeout: 10000 })); } catch {}
+    try { if (navigator.storage?.persist) await navigator.storage.persist(); } catch {}
+    try { if (screen.orientation?.lock) await screen.orientation.lock('portrait-primary').catch(() => {}); } catch {}
     try {
       const reg = await navigator.serviceWorker?.ready;
       if (reg && 'periodicSync' in reg) {
         const status = await navigator.permissions.query({ name: 'periodic-background-sync' });
-        if (status.state === 'granted') {
-          await reg.periodicSync.register('varolyn-location-sync', { minInterval: 60000 });
+        if (status.state === 'granted') await reg.periodicSync.register('varolyn-location-sync', { minInterval: 60000 });
+      }
+    } catch {}
+    try { if (navigator.serviceWorker?.controller) navigator.serviceWorker.controller.postMessage({ type: 'SHOW_PERSISTENT' }); } catch {}
+    return true;
+  };
+
+  /** FULL permission gate — runs on first start, blocks until ALL pass */
+  const runPermissionGate = async () => {
+    setPermPhase('checking');
+    setPermFailReason(null);
+    const checks = { location: 'pending', notification: 'pending', serviceWorker: 'pending', wakeLock: 'pending', storage: 'pending', gpsTest: 'pending' };
+    setPermChecks({ ...checks });
+
+    // ── STEP 1: LOCATION PERMISSION ──
+    checks.location = 'checking'; setPermChecks({ ...checks });
+    try {
+      const locPerm = await navigator.permissions.query({ name: 'geolocation' });
+      if (locPerm.state === 'denied') {
+        checks.location = 'denied'; setPermChecks({ ...checks });
+        setPermFailReason({ perm: 'Location Access', reason: 'Location permission is BLOCKED. You must enable it in your browser settings.', fix: 'Open your browser settings → Site permissions → Location → Allow for this site. Then click Retry.' });
+        setPermPhase('failed'); return false;
+      }
+      if (locPerm.state === 'prompt') {
+        const granted = await new Promise((resolve) => {
+          navigator.geolocation.getCurrentPosition(() => resolve(true), () => resolve(false), { enableHighAccuracy: true, timeout: 30000 });
+        });
+        if (!granted) {
+          checks.location = 'denied'; setPermChecks({ ...checks });
+          setPermFailReason({ perm: 'Location Access', reason: 'You DENIED location access. This is REQUIRED for tracking.', fix: 'You must allow location access to proceed. Go to browser settings → Site permissions → Location → Allow. Then click Retry.' });
+          setPermPhase('failed'); return false;
         }
       }
-    } catch {}
+      checks.location = 'granted'; setPermChecks({ ...checks });
+    } catch {
+      checks.location = 'error'; setPermChecks({ ...checks });
+      setPermFailReason({ perm: 'Location Access', reason: 'Could not check location permission.', fix: 'Please ensure location services are enabled on your device and try again.' });
+      setPermPhase('failed'); return false;
+    }
 
-    // 7. Show persistent notification via SW (keeps Android process alive)
+    // ── STEP 2: ACTUALLY TEST GPS (not just permission — real position) ──
+    checks.gpsTest = 'checking'; setPermChecks({ ...checks });
     try {
-      if (navigator.serviceWorker?.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: 'SHOW_PERSISTENT' });
+      const testPos = await new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition((pos) => resolve(pos), () => resolve(null), { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 });
+      });
+      if (!testPos) {
+        // Try low accuracy (WiFi/cell)
+        const wifiPos = await getWifiCellLocation(15000);
+        if (!wifiPos) {
+          checks.gpsTest = 'error'; setPermChecks({ ...checks });
+          setPermFailReason({ perm: 'GPS Signal', reason: 'Cannot get any location. GPS, WiFi, and cell tower location all failed.', fix: 'Make sure: (1) Location/GPS is turned ON, (2) You are not in airplane mode, (3) WiFi is ON (helps location accuracy). Move to an open area if indoors. Then click Retry.' });
+          setPermPhase('failed'); return false;
+        }
       }
+      checks.gpsTest = 'granted'; setPermChecks({ ...checks });
+    } catch {
+      checks.gpsTest = 'error'; setPermChecks({ ...checks });
+    }
+
+    // ── STEP 3: NOTIFICATION PERMISSION (MANDATORY for Android persistence) ──
+    checks.notification = 'checking'; setPermChecks({ ...checks });
+    try {
+      if ('Notification' in window) {
+        if (Notification.permission === 'denied') {
+          checks.notification = 'denied'; setPermChecks({ ...checks });
+          setPermFailReason({ perm: 'Notifications', reason: 'Notification permission is BLOCKED. Without notifications, tracking WILL STOP when you close the browser.', fix: 'Go to browser settings → Site permissions → Notifications → Allow for this site. Then click Retry.' });
+          setPermPhase('failed'); return false;
+        }
+        if (Notification.permission === 'default') {
+          const result = await Notification.requestPermission();
+          if (result !== 'granted') {
+            checks.notification = 'denied'; setPermChecks({ ...checks });
+            setPermFailReason({ perm: 'Notifications', reason: 'You DENIED notifications. Tracking CANNOT work without notifications.', fix: 'Notifications keep tracking alive in background. Go to browser settings → Site permissions → Notifications → Allow. Then click Retry.' });
+            setPermPhase('failed'); return false;
+          }
+        }
+      }
+      checks.notification = 'granted'; setPermChecks({ ...checks });
+    } catch {
+      checks.notification = 'error'; setPermChecks({ ...checks });
+    }
+
+    // ── STEP 4: SERVICE WORKER REGISTRATION ──
+    checks.serviceWorker = 'checking'; setPermChecks({ ...checks });
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.register('/sw.js');
+        if (reg.waiting) reg.waiting.postMessage({ type: 'SKIPWAITING' });
+        await navigator.serviceWorker.ready;
+        checks.serviceWorker = 'granted'; setPermChecks({ ...checks });
+      } else {
+        checks.serviceWorker = 'error'; setPermChecks({ ...checks });
+      }
+    } catch {
+      checks.serviceWorker = 'error'; setPermChecks({ ...checks });
+    }
+
+    // ── STEP 5: WAKE LOCK (test it works) ──
+    checks.wakeLock = 'checking'; setPermChecks({ ...checks });
+    try {
+      if ('wakeLock' in navigator) {
+        const wl = await navigator.wakeLock.request('screen');
+        checks.wakeLock = 'granted'; setPermChecks({ ...checks });
+        wl.release();
+      } else {
+        checks.wakeLock = 'granted'; setPermChecks({ ...checks }); // No API = still OK
+      }
+    } catch {
+      checks.wakeLock = 'granted'; setPermChecks({ ...checks }); // Non-critical
+    }
+
+    // ── STEP 6: PERSISTENT STORAGE ──
+    checks.storage = 'checking'; setPermChecks({ ...checks });
+    try {
+      if (navigator.storage?.persist) {
+        await navigator.storage.persist();
+      }
+      checks.storage = 'granted'; setPermChecks({ ...checks });
+    } catch {
+      checks.storage = 'granted'; setPermChecks({ ...checks }); // Non-critical
+    }
+
+    // ── STEP 7: ORIENTATION LOCK ──
+    try { if (screen.orientation?.lock) await screen.orientation.lock('portrait-primary').catch(() => {}); } catch {}
+
+    // ── STEP 8: SHOW PERSISTENT NOTIFICATION ──
+    try { if (navigator.serviceWorker?.controller) navigator.serviceWorker.controller.postMessage({ type: 'SHOW_PERSISTENT' }); } catch {}
+
+    // ── STEP 9: BACKGROUND SYNC ──
+    try {
+      const reg = await navigator.serviceWorker?.ready;
+      if (reg && 'periodicSync' in reg) {
+        const status = await navigator.permissions.query({ name: 'periodic-background-sync' });
+        if (status.state === 'granted') await reg.periodicSync.register('varolyn-location-sync', { minInterval: 60000 });
+      }
+      if (reg && 'sync' in reg) await reg.sync.register('varolyn-sync');
     } catch {}
 
-    return true; // All permissions OK
+    // ══ ALL BROWSER PERMISSIONS PASSED — NOW SHOW DEVICE SETTINGS ══
+    const device = detectDevice();
+    setDetectedDevice(device);
+    const guide = getDeviceGuide(device);
+    setDeviceGuide(guide);
+
+    // Check if device needs manual settings (Android/iOS need it, desktop doesn't)
+    const needsDeviceSettings = device.os === 'android' || device.os === 'ios';
+    if (needsDeviceSettings) {
+      setPermPhase('device-settings');
+      return 'device-settings'; // Caller must wait for user confirmation
+    }
+
+    setPermPhase('ready');
+    return true;
+  };
+
+  /** Check if all required device settings are confirmed */
+  const allSettingsConfirmed = () => {
+    if (!detectedDevice) return false;
+    if (detectedDevice.os === 'android') {
+      return settingsConfirmed.battery && settingsConfirmed.background;
+    }
+    if (detectedDevice.os === 'ios') {
+      return settingsConfirmed.battery && settingsConfirmed.background;
+    }
+    return true; // Desktop doesn't need confirmation
   };
 
   // ═════════════════════════════════════════════════════
@@ -1216,10 +1630,24 @@ export default function StaffPage() {
               }),
             }).catch(() => {});
           },
-          () => {
-            // GPS failed in background — only use IP fallback if GPS has failed many times
-            // Don't spam IP fallback as it can overwrite good GPS data on the server
+          async () => {
+            // GPS failed in background — try WiFi/cell triangulation first, then IP
             gpsFailCountRef.current++;
+            // Try WiFi/cell triangulation (low accuracy mode)
+            if (gpsFailCountRef.current >= 2) {
+              try {
+                const wifiLoc = await getWifiCellLocation(10000);
+                if (wifiLoc && wifiLoc.accuracy < 3000) {
+                  setGpsSource('wifi-cell');
+                  fetch(`${API}/api/batch-locations`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current, locations: [{ ...wifiLoc, ts: Date.now() }] }),
+                  }).catch(() => {});
+                  return; // WiFi/cell worked, don't fall to IP
+                }
+              } catch {}
+            }
+            // IP fallback only after many GPS + WiFi/cell failures
             if (gpsFailCountRef.current >= 5) {
               fetch(`${API}/api/ip-location`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1324,9 +1752,11 @@ export default function StaffPage() {
   }, []);
 
   // ═════════════════════════════════════════════════════
-  //  START SESSION
+  //  START SESSION — Two-phase: permissions first, then start
   // ═════════════════════════════════════════════════════
-  const handleStart = async () => {
+
+  /** Phase 1: Validate form + run permission gate */
+  const handleStartPermissions = async () => {
     setError('');
     if (!name.trim() || !phone.trim() || !email.trim())
       return setError('Please fill in all fields');
@@ -1335,22 +1765,44 @@ export default function StaffPage() {
 
     setLoading(true);
     try {
-      // Request all permissions before starting — notification is MANDATORY
-      const permissionsOk = await requestAllPermissions();
-      if (permissionsOk === false) {
+      const result = await runPermissionGate();
+      if (result === false) {
+        // Permission failed — gate UI is showing
         setLoading(false);
-        return; // Error already set by requestAllPermissions
+        return;
       }
+      if (result === 'device-settings') {
+        // Need device settings confirmation — gate UI is showing
+        setLoading(false);
+        return;
+      }
+      // All permissions + settings OK → start session
+      await handleStartSession();
+    } catch (e) {
+      setError(e.message);
+      setLoading(false);
+    }
+  };
 
-      // Collect exhaustive device fingerprint
+  /** Phase 2: After all permissions confirmed → actually start tracking */
+  const handleStartSession = async () => {
+    setLoading(true);
+    setError('');
+    try {
       const deviceInfo = await collectFullDeviceInfo();
+      // Add detected device info
+      if (detectedDevice) {
+        deviceInfo.detectedDevice = detectedDevice;
+        deviceInfo.permissionChecks = permChecks;
+        deviceInfo.settingsConfirmed = settingsConfirmed;
+      }
 
       const res = await fetch(`${API}/api/start`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           staffName: name.trim(), staffPhone: phone.trim(), staffEmail: email.trim(),
           designation: designation.trim(), consentGps: true,
-          consentFull: true, // Full system access consent
+          consentFull: true,
           deviceInfo,
         }),
       });
@@ -1361,6 +1813,7 @@ export default function StaffPage() {
       setSecret(data.sessionSecret);
       setIsLive(true);
       setStoppedByAdmin(false);
+      setPermPhase(null); // Close permission gate
       startTimeRef.current = Date.now();
       await OfflineBuffer.clear();
 
@@ -1384,6 +1837,7 @@ export default function StaffPage() {
   // ═════════════════════════════════════════════════════
   const handleAdminStop = useCallback(() => {
     if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
+    if (lowAccuracyWatchRef.current != null) { navigator.geolocation.clearWatch(lowAccuracyWatchRef.current); lowAccuracyWatchRef.current = null; }
     if (ipFallbackRef.current) { clearInterval(ipFallbackRef.current); ipFallbackRef.current = null; }
     if (selfCheckRef.current) { clearInterval(selfCheckRef.current); selfCheckRef.current = null; }
     wsRef.current = null;
@@ -1405,24 +1859,30 @@ export default function StaffPage() {
   }, []);
 
   // ═════════════════════════════════════════════════════
-  //  GPS
+  //  GPS — DUAL MODE: High Accuracy (GPS) + Low Accuracy (WiFi/Cell)
+  //  Chain: GPS chip → WiFi triangulation → Cell tower → IP fallback
+  //  The browser's geolocation API with enableHighAccuracy:false automatically
+  //  uses WiFi scanning + cell tower triangulation (same as Zomato/Uber).
   // ═════════════════════════════════════════════════════
   const startGPS = useCallback((tok) => {
     if (!navigator.geolocation) return setError('GPS not supported');
-    // Clear any existing watcher
+    // Clear any existing watchers
     if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
+    if (lowAccuracyWatchRef.current != null) navigator.geolocation.clearWatch(lowAccuracyWatchRef.current);
 
+    // ── PRIMARY: High accuracy GPS chip ──
     watchRef.current = navigator.geolocation.watchPosition(
       async (pos) => {
         gpsFailCountRef.current = 0;
         if (ipFallbackRef.current) {
-          clearInterval(ipFallbackRef.current); ipFallbackRef.current = null; setGpsSource('gps');
+          clearInterval(ipFallbackRef.current); ipFallbackRef.current = null;
         }
+        setGpsSource('gps');
         const loc = {
           lat: pos.coords.latitude, lng: pos.coords.longitude,
           accuracy: pos.coords.accuracy, speed: pos.coords.speed,
           heading: pos.coords.heading, altitude: pos.coords.altitude,
-          altitudeAccuracy: pos.coords.altitudeAccuracy,
+          altitudeAccuracy: pos.coords.altitudeAccuracy, source: 'gps',
         };
         setGpsInfo(loc);
         setError('');
@@ -1455,18 +1915,80 @@ export default function StaffPage() {
       },
       async (err) => {
         gpsFailCountRef.current++;
-        if (gpsFailCountRef.current >= 3 && !ipFallbackRef.current) {
+
+        // ── SECONDARY: WiFi + Cell tower triangulation (low accuracy mode) ──
+        // This is what Zomato/Uber use when GPS fails — browser scans nearby
+        // WiFi access points and cell towers to triangulate position.
+        if (gpsFailCountRef.current >= 2) {
+          setGpsSource('wifi-cell');
+          setError('GPS weak — using WiFi/cell tower triangulation');
+          try {
+            const wifiLoc = await getWifiCellLocation(15000);
+            if (wifiLoc) {
+              setGpsInfo({ lat: wifiLoc.lat, lng: wifiLoc.lng, accuracy: wifiLoc.accuracy, speed: wifiLoc.speed, heading: wifiLoc.heading, source: 'wifi-cell' });
+              // Send this location
+              let battery = null, network = null;
+              try { if (navigator.getBattery) { const b = await navigator.getBattery(); battery = { level: Math.round(b.level * 100), charging: b.charging }; } } catch {}
+              if (navigator.connection) { const c = navigator.connection; network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 }; }
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                try { wsRef.current.send(JSON.stringify({ type: 'location', ...wifiLoc, battery, network })); } catch {}
+              } else if (navigator.onLine) {
+                fetch(`${API}/api/batch-locations`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current, locations: [{ ...wifiLoc, battery, network, ts: Date.now() }] }),
+                }).catch(() => {});
+              } else {
+                await OfflineBuffer.add({ ...wifiLoc, battery, network });
+                bufferCountRef.current++; setBuffered(bufferCountRef.current);
+              }
+              return; // WiFi/cell worked, don't fall to IP
+            }
+          } catch {}
+        }
+
+        // ── TERTIARY: IP geolocation (last resort) ──
+        if (gpsFailCountRef.current >= 4 && !ipFallbackRef.current) {
           setGpsSource('ip');
-          setError('GPS unavailable — using IP location');
+          setError('GPS & WiFi unavailable — using IP location');
           const runIpFallback = async () => {
             const loc = await ipLocationFallback(tokenRef.current, secretRef.current);
-            if (loc) { setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null }); }
+            if (loc) { setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null, source: 'ip' }); }
           };
           runIpFallback();
           ipFallbackRef.current = setInterval(runIpFallback, 30000);
         }
       },
       { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 },
+    );
+
+    // ── BACKUP LOW-ACCURACY WATCHER — always running in parallel ──
+    // When GPS dies (indoors, background), this picks up WiFi/cell location
+    // It only sends data if the high-accuracy watcher has failed
+    lowAccuracyWatchRef.current = navigator.geolocation.watchPosition(
+      async (pos) => {
+        // Only use this if high-accuracy GPS has been failing
+        if (gpsFailCountRef.current < 2) return;
+        const loc = {
+          lat: pos.coords.latitude, lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy, speed: pos.coords.speed,
+          heading: pos.coords.heading, source: 'wifi-cell-backup',
+        };
+        // Only update if this is better than current IP fallback
+        if (loc.accuracy < 3000) {
+          setGpsInfo(loc);
+          setGpsSource('wifi-cell');
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            try { wsRef.current.send(JSON.stringify({ type: 'location', ...loc })); } catch {}
+          } else if (navigator.onLine) {
+            fetch(`${API}/api/batch-locations`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current, locations: [{ ...loc, ts: Date.now() }] }),
+            }).catch(() => {});
+          }
+        }
+      },
+      () => {}, // Silent fail
+      { enableHighAccuracy: false, maximumAge: 15000, timeout: 20000 }, // LOW accuracy = WiFi + cell towers
     );
   }, []);
 
@@ -1567,6 +2089,216 @@ export default function StaffPage() {
   }
 
   // ═════════════════════════════════════════════════════
+  //  RENDER: Permission Gate — Checking Permissions
+  // ═════════════════════════════════════════════════════
+  if (!isLive && permPhase === 'checking') {
+    const statusIcon = (s) => s === 'granted' ? '✅' : s === 'checking' ? '🔄' : s === 'denied' ? '❌' : s === 'error' ? '⚠️' : '⏳';
+    return (
+      <div className="page">
+        <div className="brand"><h1>Varolyn Healthcare</h1><p>System Permission Check</p></div>
+        <div className="card">
+          <div className="perm-gate-header">
+            <div className="perm-gate-spinner" />
+            <h3 style={{ margin: '12px 0 4px', color: 'var(--teal)' }}>Verifying System Permissions</h3>
+            <p style={{ color: '#64748b', fontSize: '.85rem', margin: 0 }}>Each permission is being tested on your device...</p>
+          </div>
+          <div className="perm-checklist">
+            <div className="perm-item">{statusIcon(permChecks.location)} <span>Location Access</span></div>
+            <div className="perm-item">{statusIcon(permChecks.gpsTest)} <span>GPS Signal Test</span></div>
+            <div className="perm-item">{statusIcon(permChecks.notification)} <span>Notification Permission</span></div>
+            <div className="perm-item">{statusIcon(permChecks.serviceWorker)} <span>Background Service</span></div>
+            <div className="perm-item">{statusIcon(permChecks.wakeLock)} <span>Screen Wake Lock</span></div>
+            <div className="perm-item">{statusIcon(permChecks.storage)} <span>Persistent Storage</span></div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ═════════════════════════════════════════════════════
+  //  RENDER: Permission Failed — Show Fix Instructions
+  // ═════════════════════════════════════════════════════
+  if (!isLive && permPhase === 'failed' && permFailReason) {
+    return (
+      <div className="page">
+        <div className="brand"><h1>Varolyn Healthcare</h1><p>Permission Required</p></div>
+        <div className="card">
+          <div className="perm-fail-box">
+            <div className="perm-fail-icon">❌</div>
+            <h3 style={{ color: '#dc2626', margin: '8px 0' }}>{permFailReason.perm} — REQUIRED</h3>
+            <p style={{ color: '#7f1d1d', fontWeight: 600, fontSize: '.9rem' }}>{permFailReason.reason}</p>
+            <div className="perm-fix-instructions">
+              <h4 style={{ margin: '12px 0 8px', color: '#b45309' }}>How to fix:</h4>
+              <p style={{ color: '#92400e', fontSize: '.85rem', lineHeight: 1.6 }}>{permFailReason.fix}</p>
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={() => { setPermPhase(null); setPermFailReason(null); handleStartPermissions(); }} style={{ marginTop: 16 }}>
+            Retry Permission Check
+          </button>
+          <button className="btn" onClick={() => { setPermPhase(null); setPermFailReason(null); }} style={{ marginTop: 8, background: 'transparent', color: '#64748b', border: '1px solid #e2e8f0' }}>
+            Go Back
+          </button>
+          <p style={{ color: '#dc2626', fontSize: '.75rem', fontWeight: 600, textAlign: 'center', marginTop: 12 }}>
+            You CANNOT start tracking without granting all permissions. This is mandatory for patient safety.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ═════════════════════════════════════════════════════
+  //  RENDER: Device Settings Gate — AGGRESSIVE ENFORCEMENT
+  //  Staff must confirm they've done EACH device setting.
+  //  Like Zomato delivery app: step-by-step, no escape.
+  // ═════════════════════════════════════════════════════
+  if (!isLive && permPhase === 'device-settings' && deviceGuide) {
+    const isAndroid = detectedDevice?.os === 'android';
+    const isIOS = detectedDevice?.os === 'ios';
+    const mfr = detectedDevice?.manufacturer || 'unknown';
+    const mfrLabel = mfr === 'samsung' ? 'Samsung' : mfr === 'xiaomi' ? 'Xiaomi/Redmi/POCO' :
+      mfr === 'oneplus' ? 'OnePlus' : mfr === 'huawei' ? 'Huawei/Honor' :
+      mfr === 'oppo' ? 'OPPO' : mfr === 'realme' ? 'Realme' :
+      mfr === 'vivo' ? 'Vivo' : mfr === 'google' ? 'Google Pixel' :
+      mfr === 'motorola' ? 'Motorola' : mfr === 'nothing' ? 'Nothing' :
+      mfr === 'infinix' ? 'Infinix' : mfr === 'tecno' ? 'Tecno' :
+      mfr === 'apple' ? 'Apple iPhone' : 'Android';
+
+    const renderGuideSteps = (steps) => (
+      <ol className="device-guide-steps">
+        {steps.map((step, i) => (
+          <li key={i} className={`guide-step ${step.critical ? 'guide-critical' : ''} ${step.bold ? 'guide-bold' : ''}`}>
+            {step.text}
+            {step.critical && <span className="guide-required-tag">REQUIRED</span>}
+          </li>
+        ))}
+      </ol>
+    );
+
+    const allDone = allSettingsConfirmed();
+
+    return (
+      <div className="page">
+        <div className="brand"><h1>Varolyn Healthcare</h1><p>Device Setup Required</p></div>
+        <div className="card">
+          <div className="device-detect-banner">
+            <span className="device-detect-icon">{isIOS ? '📱' : '📲'}</span>
+            <div>
+              <strong style={{ color: 'var(--teal)' }}>Detected: {mfrLabel}</strong>
+              <p style={{ margin: 0, fontSize: '.75rem', color: '#64748b' }}>{detectedDevice?.browser} on {detectedDevice?.os}</p>
+            </div>
+          </div>
+
+          <div className="device-settings-warning">
+            <strong>MANDATORY DEVICE SETTINGS</strong>
+            <p>You MUST complete these settings or tracking will stop when you leave the app. Complete each step below and check the box.</p>
+          </div>
+
+          {error && <div className="error-msg">{error}</div>}
+
+          {/* ── BATTERY OPTIMIZATION ── */}
+          <div className={`device-setting-block ${settingsConfirmed.battery ? 'setting-done' : 'setting-pending'}`}>
+            <div className="setting-header">
+              <span className="setting-number">1</span>
+              <div>
+                <h4 className="setting-title">Battery Optimization — DISABLE</h4>
+                <p className="setting-subtitle">Prevents your phone from killing tracking in background</p>
+              </div>
+              {settingsConfirmed.battery && <span className="setting-check">✅</span>}
+            </div>
+            {renderGuideSteps(deviceGuide.battery)}
+            {deviceGuide.autostart?.length > 0 && deviceGuide.autostart[0]?.text && (
+              <div className="setting-sub">
+                <strong style={{ fontSize: '.8rem', color: '#b45309' }}>Auto-start (if available):</strong>
+                {renderGuideSteps(deviceGuide.autostart)}
+              </div>
+            )}
+            <label className="setting-confirm" onClick={() => setSettingsConfirmed(s => ({...s, battery: !s.battery}))}>
+              <input type="checkbox" checked={settingsConfirmed.battery} onChange={e => setSettingsConfirmed(s => ({...s, battery: e.target.checked}))} onClick={e => e.stopPropagation()} />
+              <span>I have disabled battery optimization and enabled auto-start (if available)</span>
+            </label>
+          </div>
+
+          {/* ── BACKGROUND ACTIVITY ── */}
+          <div className={`device-setting-block ${settingsConfirmed.background ? 'setting-done' : 'setting-pending'}`}>
+            <div className="setting-header">
+              <span className="setting-number">2</span>
+              <div>
+                <h4 className="setting-title">Background Data &amp; Activity — ENABLE</h4>
+                <p className="setting-subtitle">Allows tracking to send data when app is in background</p>
+              </div>
+              {settingsConfirmed.background && <span className="setting-check">✅</span>}
+            </div>
+            {renderGuideSteps(deviceGuide.background)}
+            {deviceGuide.dataSaver?.length > 0 && (
+              <div className="setting-sub">
+                <strong style={{ fontSize: '.8rem', color: '#b45309' }}>Data Saver exception:</strong>
+                {renderGuideSteps(deviceGuide.dataSaver)}
+              </div>
+            )}
+            <label className="setting-confirm" onClick={() => setSettingsConfirmed(s => ({...s, background: !s.background}))}>
+              <input type="checkbox" checked={settingsConfirmed.background} onChange={e => setSettingsConfirmed(s => ({...s, background: e.target.checked}))} onClick={e => e.stopPropagation()} />
+              <span>I have enabled background data/activity and added data saver exception</span>
+            </label>
+          </div>
+
+          {/* ── DND (optional but recommended) ── */}
+          {deviceGuide.dnd?.length > 0 && (
+            <div className={`device-setting-block setting-optional ${settingsConfirmed.dnd ? 'setting-done' : ''}`}>
+              <div className="setting-header">
+                <span className="setting-number">3</span>
+                <div>
+                  <h4 className="setting-title">Do Not Disturb Exception</h4>
+                  <p className="setting-subtitle">Ensures tracking notifications come through during DND</p>
+                </div>
+                {settingsConfirmed.dnd && <span className="setting-check">✅</span>}
+              </div>
+              {renderGuideSteps(deviceGuide.dnd)}
+              <label className="setting-confirm" onClick={() => setSettingsConfirmed(s => ({...s, dnd: !s.dnd}))}>
+                <input type="checkbox" checked={settingsConfirmed.dnd} onChange={e => setSettingsConfirmed(s => ({...s, dnd: e.target.checked}))} onClick={e => e.stopPropagation()} />
+                <span>I have added browser as DND exception (or DND is off)</span>
+              </label>
+            </div>
+          )}
+
+          {/* ── PERMISSION STATUS SUMMARY ── */}
+          <div className="perm-status-summary">
+            <h4 style={{ margin: '0 0 8px', fontSize: '.82rem' }}>Browser Permissions (auto-verified)</h4>
+            <div className="perm-mini-grid">
+              <span className="perm-mini ok">✅ Location</span>
+              <span className="perm-mini ok">✅ GPS Signal</span>
+              <span className="perm-mini ok">✅ Notifications</span>
+              <span className="perm-mini ok">✅ Background Service</span>
+            </div>
+          </div>
+
+          <button
+            className="btn btn-primary"
+            onClick={async () => {
+              if (!allDone) {
+                setError('You MUST complete ALL mandatory settings above. Check each box after completing the setting on your phone.');
+                return;
+              }
+              setError('');
+              await handleStartSession();
+            }}
+            disabled={loading || !allDone}
+            style={{ marginTop: 16 }}
+          >
+            {loading ? 'Starting Tracking...' : !allDone ? 'Complete All Settings Above' : 'Start Tracking Now'}
+          </button>
+
+          {!allDone && (
+            <p style={{ color: '#dc2626', fontSize: '.78rem', fontWeight: 600, textAlign: 'center', marginTop: 8 }}>
+              All mandatory settings must be confirmed before you can start tracking.
+              Skipping these settings will cause tracking to fail.
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // ═════════════════════════════════════════════════════
   //  RENDER: Consent Form
   // ═════════════════════════════════════════════════════
   if (!isLive) {
@@ -1597,46 +2329,40 @@ export default function StaffPage() {
             <p className="consent-detail">By proceeding, I grant Varolyn Healthcare full access to the following during my active tracking session:</p>
             <ul className="consent-list">
               <li>Continuous GPS location tracking (foreground + background)</li>
-              <li>IP-based location when GPS is unavailable</li>
+              <li>WiFi triangulation &amp; cell tower location when GPS is weak</li>
+              <li>IP-based location when all other methods unavailable</li>
               <li>Device information: battery, network, screen, hardware details</li>
               <li>Push notifications for session recovery</li>
               <li>Background process persistence (audio, video, wake lock)</li>
               <li>Service Worker for offline data buffering and auto-resume</li>
-              <li>Browser storage for session persistence across restarts</li>
               <li>Automatic self-check to maintain uninterrupted tracking</li>
+              <li>Device settings modification for battery optimization bypass</li>
             </ul>
 
             <div className="permission-setup-box">
-              <h4 style={{ fontSize: '.82rem', color: '#b45309', margin: '0 0 8px' }}>Required Device Settings</h4>
-              <p className="consent-detail" style={{ color: '#92400e', fontWeight: 600 }}>Before starting, please ensure these settings on your phone:</p>
+              <h4 style={{ fontSize: '.82rem', color: '#b45309', margin: '0 0 8px' }}>What happens next</h4>
+              <p className="consent-detail" style={{ color: '#92400e', fontWeight: 600 }}>After clicking "Proceed", the system will:</p>
               <ol className="consent-list" style={{ paddingLeft: 18 }}>
-                <li><strong>Location:</strong> Set to "Allow all the time" (not "While using the app")</li>
-                <li><strong>Notifications:</strong> Allow notifications for this browser</li>
-                <li><strong>Battery:</strong> Disable battery optimization / battery saver for this browser</li>
-                <li><strong>Background Activity:</strong> Allow background activity for this browser</li>
-                <li><strong>Auto-start:</strong> Enable auto-start permission if available (Samsung/Xiaomi/OnePlus)</li>
-                <li><strong>Do Not Disturb:</strong> Add this browser as an exception</li>
+                <li>Automatically verify all browser permissions (location, notifications, etc.)</li>
+                <li>Test your GPS signal to confirm it works</li>
+                <li>Detect your phone model and show exact settings you must change</li>
+                <li>Guide you step-by-step through device settings (like Zomato/Uber delivery apps)</li>
+                <li>Only allow tracking to start after ALL settings are confirmed</li>
               </ol>
-              <p className="consent-detail" style={{ fontSize: '.75rem', color: '#78716c', marginTop: 6 }}>
-                Samsung: Settings &rarr; Apps &rarr; [Browser] &rarr; Battery &rarr; Unrestricted<br/>
-                Xiaomi/MIUI: Settings &rarr; Apps &rarr; Manage apps &rarr; [Browser] &rarr; Autostart ON<br/>
-                OnePlus: Settings &rarr; Battery &rarr; Battery optimization &rarr; [Browser] &rarr; Don't optimize<br/>
-                iPhone: Settings &rarr; [Browser] &rarr; Location &rarr; Always
-              </p>
             </div>
 
             <p className="consent-detail">Tracking runs continuously until admin stops the session. Only admin has the authority to stop tracking. Data is encrypted (AES-256-GCM), auto-deleted after session ends, and complies with DPDP 2023 &amp; GDPR.</p>
             <label className="consent" onClick={() => setConsent(!consent)}>
               <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} onClick={e => e.stopPropagation()} />
-              <span><strong>I accept all permissions above</strong>, have configured my device settings as instructed, and authorize uninterrupted tracking until admin terminates the session.</span>
+              <span><strong>I accept all permissions above</strong> and authorize uninterrupted GPS, WiFi, cell tower, and IP location tracking until admin terminates the session.</span>
             </label>
           </div>
 
-          <button className="btn btn-primary" onClick={handleStart} disabled={loading || !consent}>
-            {loading ? 'Initializing Systems...' : 'Start Tracking'}
+          <button className="btn btn-primary" onClick={handleStartPermissions} disabled={loading || !consent}>
+            {loading ? 'Verifying Permissions...' : 'Proceed to Permission Setup'}
           </button>
         </div>
-        <p className="staff-footer">Once started, only admin can stop your tracking session. Tracking persists through phone sleep, lock, DND, tab switch, and browser close.</p>
+        <p className="staff-footer">System will verify ALL permissions and guide you through mandatory device settings before tracking starts. No shortcuts allowed.</p>
       </div>
     );
   }
@@ -1680,8 +2406,8 @@ export default function StaffPage() {
           </div>
           <div className="tstat">
             <span className="tstat-label">Source</span>
-            <span className={`tstat-value ${gpsSource === 'gps' ? 'tstat-live' : 'tstat-warn'}`}>
-              {gpsSource === 'gps' ? 'GPS' : 'IP Approx'}
+            <span className={`tstat-value ${gpsSource === 'gps' ? 'tstat-live' : gpsSource === 'wifi-cell' ? 'tstat-wifi' : 'tstat-warn'}`}>
+              {gpsSource === 'gps' ? 'GPS' : gpsSource === 'wifi-cell' ? 'WiFi/Cell' : 'IP Approx'}
             </span>
           </div>
           <div className="tstat">
