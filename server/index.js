@@ -124,6 +124,35 @@ function safeCompare(a, b) {
   return cryptoNode.timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
+/** Sanitize device info — flatten nested objects to strings for safe React rendering */
+function sanitizeDeviceInfo(info) {
+  if (!info || typeof info !== 'object') return {};
+  const safe = {};
+  for (const [k, v] of Object.entries(info)) {
+    if (v === null || v === undefined) continue;
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      safe[k] = v;
+    } else if (Array.isArray(v)) {
+      // Flatten arrays of primitives to string, keep arrays of objects as-is
+      safe[k] = v.every(i => typeof i !== 'object') ? v : v.map(i => typeof i === 'object' ? JSON.stringify(i) : i);
+    } else if (typeof v === 'object') {
+      // Special handling for known nested objects
+      if (k === 'screen' && v.width && v.height) {
+        safe[k] = `${v.width}x${v.height}`;
+        if (v.colorDepth) safe.colorDepth = v.colorDepth;
+        if (v.orientation) safe.screenOrientation = typeof v.orientation === 'string' ? v.orientation : String(v.orientation);
+      } else if (k === 'battery' || k === 'network' || k === 'gpu' || k === 'parsedUA' || k === 'storageEstimate' || k === 'performanceMemory' || k === 'permissions') {
+        // Keep known sub-objects intact (they're accessed by specific property)
+        safe[k] = v;
+      } else {
+        // Unknown object — stringify it
+        try { safe[k] = JSON.stringify(v); } catch { safe[k] = '[object]'; }
+      }
+    }
+  }
+  return safe;
+}
+
 /** Audit log */
 async function auditLog(eventType, actor, targetId, ip, details = {}) {
   try {
@@ -642,7 +671,7 @@ async function build() {
         battery:    s.last_battery || {},
         network:    s.last_network || {},
         ipGeo:      s.ip_geo || {},
-        deviceInfo: s.device_info || {},
+        deviceInfo: sanitizeDeviceInfo(s.device_info || {}),
       })),
     };
   });

@@ -313,6 +313,17 @@ export default function DashboardPage() {
   );
 }
 
+// ── Safe string renderer: NEVER pass objects/arrays to React ──
+function safe(val) {
+  if (val === null || val === undefined) return '';
+  if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (Array.isArray(val)) return val.map(safe).join(', ');
+  if (typeof val === 'object') {
+    try { return JSON.stringify(val); } catch { return '[object]'; }
+  }
+  return String(val);
+}
+
 // ══════════════════════════════════════════════════════
 //  STAFF CARD (admin-only — shows full OSINT + controls)
 // ══════════════════════════════════════════════════════
@@ -328,6 +339,11 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
   const bat   = s.battery || dev.battery || {};
   const net   = s.network || dev.network || {};
   const loc   = s.location;
+
+  // Safely extract screen as string no matter what format it is
+  const screenStr = !dev.screen ? '' :
+    typeof dev.screen === 'string' ? dev.screen :
+    (dev.screen.width && dev.screen.height) ? `${dev.screen.width}x${dev.screen.height}` : '';
 
   // Offline detection: no update for 60+ seconds = offline
   const lastUpdateMs = loc?.updatedAt ? Date.now() - new Date(loc.updatedAt).getTime() : Infinity;
@@ -399,44 +415,44 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
         <span>&#128231; {s.staffEmail}</span>
       </div>
 
-      {/* OSINT Data */}
+      {/* OSINT Data — all values passed through safe() to prevent React crash */}
       <div className="sc-osint">
         {loc && (
           <div className="osint-row">
             <span className="osint-icon">&#128205;</span>
-            <span>GPS: {loc.lat.toFixed(5)}, {loc.lng.toFixed(5)}
-              {loc.accuracy && <small> (&plusmn;{loc.accuracy.toFixed(0)}m)</small>}
+            <span>GPS: {Number(loc.lat).toFixed(5)}, {Number(loc.lng).toFixed(5)}
+              {loc.accuracy && <small> (&plusmn;{Number(loc.accuracy).toFixed(0)}m)</small>}
             </span>
           </div>
         )}
         {estimatedLoc && (
           <div className="osint-row">
             <span className="osint-icon">&#128268;</span>
-            <span className="sc-estimated">Est: {estimatedLoc.lat.toFixed(5)}, {estimatedLoc.lng.toFixed(5)} (predicted)</span>
+            <span className="sc-estimated">Est: {Number(estimatedLoc.lat).toFixed(5)}, {Number(estimatedLoc.lng).toFixed(5)} (predicted)</span>
           </div>
         )}
         {loc?.updatedAt && (
           <div className="osint-row">
             <span className="osint-icon">&#128336;</span>
-            <span>Updated {timeAgo(loc.updatedAt)}{isOffline ? ' (OFFLINE)' : ''}</span>
+            <span>Updated {safe(timeAgo(loc.updatedAt))}{isOffline ? ' (OFFLINE)' : ''}</span>
           </div>
         )}
         {loc?.speed > 0 && (
           <div className="osint-row">
             <span className="osint-icon">&#128663;</span>
-            <span>{(loc.speed * 3.6).toFixed(0)} km/h</span>
+            <span>{(Number(loc.speed) * 3.6).toFixed(0)} km/h</span>
           </div>
         )}
         {ipCity && (
           <div className="osint-row">
             <span className="osint-icon">&#127760;</span>
-            <span>IP: {ipCity}</span>
+            <span>IP: {safe(ipCity)}</span>
           </div>
         )}
         {ipGeo.isp && ipGeo.isp !== 'Local' && (
           <div className="osint-row">
             <span className="osint-icon">&#128274;</span>
-            <span>ISP: {ipGeo.isp}
+            <span>ISP: {safe(ipGeo.isp)}
               {ipGeo.mobile && ' (Mobile)'}
               {ipGeo.proxy && <span className="sc-warn"> Warning: Proxy</span>}
             </span>
@@ -445,31 +461,31 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
         {(ua.device || ua.os) && (
           <div className="osint-row">
             <span className="osint-icon">&#128241;</span>
-            <span>{[ua.device, ua.os, ua.browser].filter(Boolean).join(' / ')}</span>
+            <span>{[ua.device, ua.os, ua.browser].filter(Boolean).map(safe).join(' / ')}</span>
           </div>
         )}
         {bat.level != null && (
           <div className="osint-row">
             <span className="osint-icon">&#128267;</span>
-            <span>{bat.level}% {bat.charging ? 'Charging' : ''}</span>
+            <span>{safe(bat.level)}% {bat.charging ? 'Charging' : ''}</span>
           </div>
         )}
         {net.type && (
           <div className="osint-row">
             <span className="osint-icon">&#128225;</span>
-            <span>{net.type.toUpperCase()}{net.downlink ? ` | ${net.downlink} Mbps` : ''}</span>
+            <span>{safe(net.type).toUpperCase()}{net.downlink ? ` | ${safe(net.downlink)} Mbps` : ''}</span>
           </div>
         )}
-        {dev.screen && (
+        {screenStr && (
           <div className="osint-row">
             <span className="osint-icon">&#128421;</span>
-            <span>Screen: {typeof dev.screen === 'string' ? dev.screen : `${dev.screen.width}x${dev.screen.height}`}{dev.pixelRatio > 1 ? ` @${dev.pixelRatio}x` : ''}</span>
+            <span>Screen: {screenStr}{dev.pixelRatio > 1 ? ` @${dev.pixelRatio}x` : ''}</span>
           </div>
         )}
         {dev.timezone && (
           <div className="osint-row">
             <span className="osint-icon">&#127757;</span>
-            <span>{dev.timezone}</span>
+            <span>{safe(dev.timezone)}</span>
           </div>
         )}
       </div>
