@@ -75,12 +75,18 @@ export default function DashboardPage() {
         headers: { Authorization: `Bearer ${jwt}` },
       });
       if (res.status === 401 || res.status === 403) {
-        handleLogout();
+        // JWT expired/invalid — force logout and show login
+        localStorage.removeItem('varolyn_admin_jwt');
+        setJwt('');
+        setSessions([]);
+        setLoading(false);
         return;
       }
       const data = await res.json();
       setSessions(data.sessions || []);
-    } catch {}
+    } catch (err) {
+      console.warn('[Dashboard] Fetch error:', err.message);
+    }
     setLoading(false);
   }, [jwt]);
 
@@ -228,10 +234,10 @@ export default function DashboardPage() {
   return (
     <div className="dash-page">
       {/* Header */}
-      <div className="dash-header">
+      <div className="dash-header" style={{ background: 'var(--teal)', color: '#fff', borderRadius: 'var(--radius)', padding: '16px 20px', marginBottom: 20 }}>
         <div>
-          <h1>Varolyn Healthcare</h1>
-          <p>Admin Control Center</p>
+          <h1 style={{ color: '#fff', fontSize: '1.3rem', margin: 0 }}>Varolyn Healthcare</h1>
+          <p style={{ color: 'rgba(255,255,255,0.8)', margin: '4px 0 0', fontSize: '.85rem' }}>Admin Control Center</p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button className="btn-logout" onClick={handleLogout} title="Sign out">
@@ -256,7 +262,12 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {loading && <p style={{ textAlign: 'center', color: '#9ca3af', padding: 40 }}>Loading...</p>}
+      {loading && (
+        <div style={{ textAlign: 'center', padding: 60 }}>
+          <div className="pulse-dot" style={{ width: 16, height: 16, margin: '0 auto 16px' }} />
+          <p style={{ color: '#9ca3af' }}>Loading sessions...</p>
+        </div>
+      )}
 
       {/* Active Staff Cards */}
       {activeSessions.length > 0 && (
