@@ -1135,11 +1135,23 @@ export default function StaffPage() {
           resolve(false);
         },
         async () => {
-          // GPS failed — try IP fallback immediately
-          if (navigator.onLine) {
-            const ipLoc = await ipLocationFallback(tokenRef.current, secretRef.current);
-            resolve(!!ipLoc);
-          } else { resolve(false); }
+          // GPS failed — try WiFi/cell triangulation, NOT IP
+          try {
+            const wifiLoc = await getWifiCellLocation(10000);
+            if (wifiLoc && wifiLoc.accuracy < 3000) {
+              setGpsSource('wifi-cell');
+              setGpsInfo({ lat: wifiLoc.lat, lng: wifiLoc.lng, accuracy: wifiLoc.accuracy, speed: wifiLoc.speed, heading: wifiLoc.heading, source: 'wifi-cell' });
+              if (navigator.onLine) {
+                fetch(`${API}/api/batch-locations`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current, locations: [{ ...wifiLoc, ts: Date.now() }] }),
+                }).catch(() => {});
+              }
+              resolve(true); return;
+            }
+          } catch {}
+          // DO NOT call ip-location here — it overwrites real GPS with 20km wrong data
+          resolve(false);
         },
         { enableHighAccuracy: true, maximumAge: 15000, timeout: 12000 }
       );
@@ -1271,17 +1283,25 @@ export default function StaffPage() {
     // ── 8. Internet ──
     checks.online = navigator.onLine;
 
-    // ── 9. If GPS watcher failed AND online, IP fallback ──
-    if (!checks.gps && checks.online && !ipFallbackRef.current) {
-      setGpsSource('ip');
-      const ipLoc = await ipLocationFallback(tokenRef.current, secretRef.current);
-      checks.ip = !!ipLoc;
-      if (ipLoc) setGpsInfo({ lat: ipLoc.lat, lng: ipLoc.lng, accuracy: 5000, speed: null, heading: null });
-      // Start continuous IP fallback
-      ipFallbackRef.current = setInterval(async () => {
-        const loc = await ipLocationFallback(tokenRef.current, secretRef.current);
-        if (loc) setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null });
-      }, 30000);
+    // ── 9. If GPS watcher failed AND online → try WiFi/cell FIRST, IP only as absolute last resort ──
+    if (!checks.gps && checks.online) {
+      // Try WiFi/cell triangulation first (much more accurate than IP)
+      try {
+        const wifiLoc = await getWifiCellLocation(10000);
+        if (wifiLoc && wifiLoc.accuracy < 3000) {
+          setGpsSource('wifi-cell');
+          checks.ip = true; // Mark as recovered
+          setGpsInfo({ lat: wifiLoc.lat, lng: wifiLoc.lng, accuracy: wifiLoc.accuracy, speed: null, heading: null, source: 'wifi-cell' });
+          // Send WiFi/cell location to server
+          fetch(`${API}/api/batch-locations`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current, locations: [{ ...wifiLoc, ts: Date.now() }] }),
+          }).catch(() => {});
+        }
+      } catch {}
+      // DO NOT start IP fallback from self-check — IP is 5-20km wrong
+      // The server already has a 30-min guard protecting GPS data from IP overwrite
+      // GPS will recover on its own when page regains focus / push reopens it
     }
 
     // ── 10. Flush offline buffer ──
@@ -1647,13 +1667,9 @@ export default function StaffPage() {
                 }
               } catch {}
             }
-            // IP fallback only after many GPS + WiFi/cell failures
-            if (gpsFailCountRef.current >= 5) {
-              fetch(`${API}/api/ip-location`, {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current }),
-              }).catch(() => {});
-            }
+            // DO NOT call ip-location from polling — server protects GPS data for 30 min
+            // IP is 5-20km wrong and overwrites real GPS position on dashboard
+            // The heartbeat already confirms device is alive — no need for IP update
           },
           { enableHighAccuracy: true, maximumAge: 10000, timeout: 12000 }
         );
@@ -1946,16 +1962,18 @@ export default function StaffPage() {
           } catch {}
         }
 
-        // ── TERTIARY: IP geolocation (last resort) ──
-        if (gpsFailCountRef.current >= 4 && !ipFallbackRef.current) {
+        // ── TERTIARY: IP geolocation — ABSOLUTE LAST RESORT ──
+        // Only after 10+ GPS failures AND WiFi/cell also failed
+        // IP is 5-20km wrong — server will protect existing GPS data for 30 min
+        if (gpsFailCountRef.current >= 10 && !ipFallbackRef.current) {
           setGpsSource('ip');
-          setError('GPS & WiFi unavailable — using IP location');
-          const runIpFallback = async () => {
-            const loc = await ipLocationFallback(tokenRef.current, secretRef.current);
-            if (loc) { setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null, source: 'ip' }); }
-          };
-          runIpFallback();
-          ipFallbackRef.current = setInterval(runIpFallback, 30000);
+          setError('GPS & WiFi unavailable — approximate location only');
+          // Only call IP once, not on interval — server protects GPS data anyway
+          ipLocationFallback(tokenRef.current, secretRef.current).then(loc => {
+            if (loc) setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null, source: 'ip' });
+          }).catch(() => {});
+          // Set ref so we don't repeat
+          ipFallbackRef.current = true;
         }
       },
       { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 },

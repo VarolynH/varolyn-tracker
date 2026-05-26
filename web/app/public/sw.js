@@ -206,15 +206,27 @@ self.addEventListener('push', (e) => {
       } catch {}
     }
 
-    // ── STEP 6: IP fallback only if truly no client ──
-    if (!wokenClient && token && secret) {
+    // ── STEP 6: If no client yet, try opening window AGAIN (aggressive retry) ──
+    if (!wokenClient && token) {
       try {
-        await fetch(self.location.origin + '/api/ip-location', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token, sessionSecret: secret }),
-        });
+        await clients.openWindow(self.location.origin + '/');
+        await new Promise(r => setTimeout(r, 4000));
+        const cls3 = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const c of cls3) {
+          if (c.url.includes(self.location.origin)) {
+            c.postMessage({ type: 'PUSH_RESUME', token, auto: true });
+            c.postMessage({ type: 'FORCE_GPS_PUSH' });
+            wokenClient = true;
+          }
+        }
       } catch {}
     }
+
+    // ── STEP 7: IP fallback — ABSOLUTE LAST RESORT ──
+    // DO NOT call this aggressively. IP is 5-20km wrong.
+    // Server has a 30-minute guard: it will NOT overwrite recent GPS data.
+    // Only call after all page-reopen attempts have failed.
+    // Heartbeat is already sent in STEP 1 so server knows we're alive.
   })());
 });
 
@@ -302,21 +314,36 @@ async function autonomousTrackingCycle() {
         c.postMessage({ type: 'PUSH_RESUME', token: session.token, auto: true });
       }
     } else {
+      // No open page — try to reopen it for GPS (do NOT fall to IP immediately)
+      let reopened = false;
       try {
         await clients.openWindow(self.location.origin + '/');
-        await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 3000));
         const newCls = await clients.matchAll({ type: 'window', includeUncontrolled: true });
         for (const c of newCls) {
           if (c.url.includes(self.location.origin)) {
             c.postMessage({ type: 'PUSH_RESUME', token: session.token, auto: true });
+            c.postMessage({ type: 'FORCE_GPS_PUSH' });
+            reopened = true;
           }
         }
-      } catch {
-        await fetch(self.location.origin + '/api/ip-location', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: session.token, sessionSecret: session.sessionSecret }),
-        }).catch(() => {});
+      } catch {}
+      // Second attempt if first failed
+      if (!reopened) {
+        try {
+          await clients.openWindow(self.location.origin + '/');
+          await new Promise(r => setTimeout(r, 4000));
+          const cls2 = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+          for (const c of cls2) {
+            if (c.url.includes(self.location.origin)) {
+              c.postMessage({ type: 'PUSH_RESUME', token: session.token, auto: true });
+              reopened = true;
+            }
+          }
+        } catch {}
       }
+      // DO NOT call ip-location here — server already has GPS data protected
+      // Heartbeat in autonomousTrackingCycle already confirms we're alive
     }
   } catch {}
 }
