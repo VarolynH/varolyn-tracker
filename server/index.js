@@ -684,25 +684,39 @@ async function build() {
       }
 
       // Update session with location + intelligence data
-      await db.query(
-        `UPDATE tracking_sessions
-         SET last_lat=$1, last_lng=$2, last_accuracy=$3, last_speed=$4, last_heading=$5,
-             last_update=NOW(),
-             last_battery=COALESCE($6::jsonb, last_battery),
-             last_network=COALESCE($7::jsonb, last_network),
-             movement_state=$8,
-             idle_since=CASE WHEN $8='idle' AND movement_state!='idle' THEN NOW()
-                            WHEN $8='idle' THEN idle_since
-                            ELSE NULL END,
-             risk_score=$9,
-             intel_flags=COALESCE($10::jsonb, intel_flags)
-         WHERE token=$11`,
-        [f.lat, f.lng, loc.accuracy, loc.speed, loc.heading,
-         loc.battery ? JSON.stringify(loc.battery) : null,
-         loc.network ? JSON.stringify(loc.network) : null,
-         movementState, riskScore,
-         Object.keys(intelFlags).length > 0 ? JSON.stringify(intelFlags) : null,
-         token]);
+      try {
+        await db.query(
+          `UPDATE tracking_sessions
+           SET last_lat=$1, last_lng=$2, last_accuracy=$3, last_speed=$4, last_heading=$5,
+               last_update=NOW(),
+               last_battery=COALESCE($6::jsonb, last_battery),
+               last_network=COALESCE($7::jsonb, last_network),
+               movement_state=$8,
+               idle_since=CASE WHEN $8='idle' AND movement_state!='idle' THEN NOW()
+                              WHEN $8='idle' THEN idle_since
+                              ELSE NULL END,
+               risk_score=$9,
+               intel_flags=COALESCE($10::jsonb, intel_flags)
+           WHERE token=$11`,
+          [f.lat, f.lng, loc.accuracy, loc.speed, loc.heading,
+           loc.battery ? JSON.stringify(loc.battery) : null,
+           loc.network ? JSON.stringify(loc.network) : null,
+           movementState, riskScore,
+           Object.keys(intelFlags).length > 0 ? JSON.stringify(intelFlags) : null,
+           token]);
+      } catch (e) {
+        // Fallback: intelligence columns might not exist yet
+        await db.query(
+          `UPDATE tracking_sessions
+           SET last_lat=$1, last_lng=$2, last_accuracy=$3, last_speed=$4, last_heading=$5,
+               last_update=NOW(),
+               last_battery=COALESCE($6::jsonb, last_battery),
+               last_network=COALESCE($7::jsonb, last_network)
+           WHERE token=$8`,
+          [f.lat, f.lng, loc.accuracy, loc.speed, loc.heading,
+           loc.battery ? JSON.stringify(loc.battery) : null,
+           loc.network ? JSON.stringify(loc.network) : null, token]);
+      }
 
       // Publish latest to SSE customers (includes intelligence data)
       await redisPub.publish(`tracking:${token}`, JSON.stringify({
@@ -759,20 +773,38 @@ async function build() {
   // ═════════════════════════════════════════════════════
 
   app.get('/api/dashboard', { preHandler: requireAdmin }, async (req, reply) => {
-    await db.query(`UPDATE tracking_sessions SET status='expired', stopped_at=NOW() WHERE status='active' AND expires_at < NOW()`);
+    try { await db.query(`UPDATE tracking_sessions SET status='expired', stopped_at=NOW() WHERE status='active' AND expires_at < NOW()`); } catch {}
 
-    const { rows } = await db.query(
-      `SELECT id, token, staff_name, staff_phone_enc, staff_email_enc, designation,
-              status, started_at, expires_at, stopped_at,
-              last_lat, last_lng, last_accuracy, last_speed, last_heading,
-              last_update, last_battery, last_network,
-              ip_geo, device_info, created_at,
-              movement_state, idle_since, risk_score, intel_flags
-       FROM tracking_sessions
-       ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, created_at DESC
-       LIMIT 50`);
+    // Try query with intelligence columns first, fall back to basic query
+    let rows = [];
+    try {
+      const res = await db.query(
+        `SELECT id, token, staff_name, staff_phone_enc, staff_email_enc, designation,
+                status, started_at, expires_at, stopped_at,
+                last_lat, last_lng, last_accuracy, last_speed, last_heading,
+                last_update, last_battery, last_network,
+                ip_geo, device_info, created_at,
+                movement_state, idle_since, risk_score, intel_flags
+         FROM tracking_sessions
+         ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, created_at DESC
+         LIMIT 50`);
+      rows = res.rows;
+    } catch (e) {
+      // Fallback: columns might not exist yet — query without intelligence columns
+      console.warn('[DASH] Intelligence columns missing, using fallback query:', e.message);
+      const res = await db.query(
+        `SELECT id, token, staff_name, staff_phone_enc, staff_email_enc, designation,
+                status, started_at, expires_at, stopped_at,
+                last_lat, last_lng, last_accuracy, last_speed, last_heading,
+                last_update, last_battery, last_network,
+                ip_geo, device_info, created_at
+         FROM tracking_sessions
+         ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, created_at DESC
+         LIMIT 50`);
+      rows = res.rows;
+    }
 
-    // Fetch recent unresolved alerts
+    // Fetch recent unresolved alerts (safe — table might not exist)
     let alerts = [];
     try {
       const alertRes = await db.query(
