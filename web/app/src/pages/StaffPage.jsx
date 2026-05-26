@@ -487,23 +487,29 @@ export default function StaffPage() {
   //  REQUEST ALL PERMISSIONS UPFRONT
   // ═════════════════════════════════════════════════════
   const requestAllPermissions = async () => {
-    // 1. Notification permission
+    // 1. Notification permission — CRITICAL for push-based recovery
     try {
       if ('Notification' in window && Notification.permission === 'default') {
-        await Notification.requestPermission();
+        const result = await Notification.requestPermission();
+        if (result !== 'granted') {
+          console.warn('[PERMISSIONS] Notification permission denied — push recovery will not work');
+        }
       }
     } catch {}
 
     // 2. Persistent storage (prevents browser from evicting our data)
     try {
       if (navigator.storage?.persist) {
-        await navigator.storage.persist();
+        const persisted = await navigator.storage.persist();
+        if (!persisted) console.warn('[PERMISSIONS] Persistent storage denied');
       }
     } catch {}
 
-    // 3. Request GPS permission (triggers on watchPosition, but pre-warm it)
+    // 3. Request GPS permission with high accuracy (triggers browser permission prompt)
     try {
-      navigator.geolocation.getCurrentPosition(() => {}, () => {}, { enableHighAccuracy: true, timeout: 5000 });
+      await new Promise((resolve) => {
+        navigator.geolocation.getCurrentPosition(resolve, resolve, { enableHighAccuracy: true, timeout: 10000 });
+      });
     } catch {}
 
     // 4. Screen orientation lock (keep portrait, prevent rotation issues)
@@ -512,11 +518,35 @@ export default function StaffPage() {
         await screen.orientation.lock('portrait-primary').catch(() => {});
       }
     } catch {}
+
+    // 5. Register SW immediately if not registered
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.register('/sw.js');
+        // Ensure SW is active
+        if (reg.waiting) reg.waiting.postMessage({ type: 'SKIPWAITING' });
+      }
+    } catch {}
+
+    // 6. Request background fetch permission (Chrome)
+    try {
+      const reg = await navigator.serviceWorker?.ready;
+      if (reg && 'periodicSync' in reg) {
+        const status = await navigator.permissions.query({ name: 'periodic-background-sync' });
+        if (status.state === 'granted') {
+          await reg.periodicSync.register('varolyn-location-sync', { minInterval: 60000 });
+        }
+      }
+    } catch {}
   };
 
   // ═════════════════════════════════════════════════════
   //  KEEPALIVE SYSTEM
   // ═════════════════════════════════════════════════════
+  const webLockRef = useRef(null);
+  const bgSelfCheckRef = useRef(null);
+  const broadcastRef = useRef(null);
+
   const startAllKeepAlives = async () => {
     // 1. Wake Lock
     try {
@@ -539,9 +569,42 @@ export default function StaffPage() {
     videoKeepRef.current = new NoSleepVideo();
     videoKeepRef.current.start();
 
-    // 4. STEALTH: No persistent notification. Keepalive via audio+video+wakeLock only.
+    // 4. Web Locks API — prevents browser from evicting this page
+    // The lock is held as long as the promise doesn't resolve = indefinitely while tracking
+    try {
+      if (navigator.locks) {
+        // Don't re-acquire if already held
+        if (!webLockRef.current) {
+          webLockRef.current = true;
+          navigator.locks.request('varolyn-tracking-lock', { mode: 'exclusive', ifAvailable: true }, (lock) => {
+            if (!lock) return; // Another tab holds it
+            // Hold the lock indefinitely by returning a promise that never resolves while tracking
+            return new Promise((resolve) => {
+              const checkInterval = setInterval(() => {
+                if (!isLiveRef.current) { clearInterval(checkInterval); resolve(); webLockRef.current = null; }
+              }, 5000);
+            });
+          }).catch(() => {});
+        }
+      }
+    } catch {}
 
-    // 5. Periodic background sync
+    // 5. BroadcastChannel — coordinate across tabs, survive tab close
+    try {
+      if (!broadcastRef.current && typeof BroadcastChannel !== 'undefined') {
+        broadcastRef.current = new BroadcastChannel('varolyn-tracking');
+        broadcastRef.current.onmessage = (e) => {
+          const { type } = e.data || {};
+          if (type === 'PING' && isLiveRef.current) {
+            broadcastRef.current.postMessage({ type: 'PONG', token: tokenRef.current });
+          }
+          if (type === 'ADMIN_STOP') handleAdminStop();
+          if (type === 'FORCE_GPS') { try { forceLocationPush(); } catch {} }
+        };
+      }
+    } catch {}
+
+    // 6. Periodic background sync
     try {
       const reg = await navigator.serviceWorker?.ready;
       if (reg && 'periodicSync' in reg) {
@@ -549,19 +612,50 @@ export default function StaffPage() {
       }
     } catch {}
 
-    // 6. Register one-shot background sync (fires when back online)
+    // 7. Register one-shot background sync (fires when back online)
     try {
       const reg = await navigator.serviceWorker?.ready;
       if (reg && 'sync' in reg) {
         await reg.sync.register('varolyn-sync');
       }
     } catch {}
+
+    // 8. Request persistent storage (prevent browser from clearing our data)
+    try {
+      if (navigator.storage?.persist) {
+        await navigator.storage.persist();
+      }
+    } catch {}
+
+    // 9. Accelerated background self-check — every 20s when page is hidden
+    // This is the main defense against background throttling killing tracking
+    if (!bgSelfCheckRef.current) {
+      bgSelfCheckRef.current = setInterval(() => {
+        if (!isLiveRef.current) return;
+        if (document.visibilityState === 'hidden') {
+          // In background: do a quick force-push and reconnect check
+          try { forceLocationPush(); } catch {}
+          if (!wsRef.current || wsRef.current.readyState > 1) {
+            connectWS(tokenRef.current, secretRef.current);
+          }
+          // Re-register SW session data
+          tellSW(tokenRef.current, secretRef.current);
+          // Re-register background sync
+          navigator.serviceWorker?.ready?.then(reg => {
+            if (reg && 'sync' in reg) reg.sync.register('varolyn-sync').catch(() => {});
+          }).catch(() => {});
+        }
+      }, 20_000); // Every 20 seconds
+    }
   };
 
   const stopAllKeepAlives = () => {
-    if (wakeLockRef.current) { wakeLockRef.current.release().catch(() => {}); wakeLockRef.current = null; }
+    if (wakeLockRef.current) { try { wakeLockRef.current.release(); } catch {} wakeLockRef.current = null; }
     if (audioKeepRef.current) { audioKeepRef.current.stop(); audioKeepRef.current = null; }
     if (videoKeepRef.current) { videoKeepRef.current.stop(); videoKeepRef.current = null; }
+    if (bgSelfCheckRef.current) { clearInterval(bgSelfCheckRef.current); bgSelfCheckRef.current = null; }
+    if (broadcastRef.current) { try { broadcastRef.current.close(); } catch {} broadcastRef.current = null; }
+    webLockRef.current = null; // Web Lock auto-releases when promise resolves
   };
 
   // ═════════════════════════════════════════════════════
@@ -631,7 +725,7 @@ export default function StaffPage() {
 
     selfCheckRef.current = setInterval(() => {
       if (isLiveRef.current) runSelfCheck();
-    }, 120_000); // Every 2 minutes
+    }, 60_000); // Every 60 seconds — fast recovery
   };
 
   const runSelfCheck = async () => {
@@ -943,11 +1037,10 @@ export default function StaffPage() {
   }, []);
 
   // ── Last-gasp handlers: pagehide, freeze, beforeunload ──
-  // When browser is about to kill this page, do a final GPS push via beacon API
+  // When browser is about to kill this page, do everything possible to preserve tracking
   useEffect(() => {
-    const beforeUnloadHandler = (e) => {
-      if (!isLiveRef.current) return;
-      // Last-gasp: send current position via sendBeacon (survives page close)
+    const sendLastGasp = () => {
+      if (!isLiveRef.current || !tokenRef.current || !secretRef.current) return;
       try {
         const data = JSON.stringify({
           token: tokenRef.current, sessionSecret: secretRef.current,
@@ -955,51 +1048,76 @@ export default function StaffPage() {
         });
         navigator.sendBeacon(`${API}/api/batch-locations`, new Blob([data], { type: 'application/json' }));
       } catch {}
+      // Also tell SW to keep session alive
+      if (navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'SET_SESSION', data: { token: tokenRef.current, sessionSecret: secretRef.current } });
+      }
+      // Register background sync as a last resort
+      try {
+        navigator.serviceWorker?.ready?.then(reg => {
+          if (reg && 'sync' in reg) reg.sync.register('varolyn-sync').catch(() => {});
+        }).catch(() => {});
+      } catch {}
+    };
+
+    const beforeUnloadHandler = (e) => {
+      if (!isLiveRef.current) return;
+      sendLastGasp();
       e.preventDefault();
-      e.returnValue = 'Tracking session is active. It continues in background. Admin must stop the session.';
+      e.returnValue = 'Tracking session is active. Only admin can stop this session.';
       return e.returnValue;
     };
 
     const pageHideHandler = () => {
-      if (!isLiveRef.current) return;
       // sendBeacon survives page hide (works on mobile when tab is killed)
-      try {
-        const data = JSON.stringify({
-          token: tokenRef.current, sessionSecret: secretRef.current,
-          locations: [{ lat: gpsInfo?.lat || 0, lng: gpsInfo?.lng || 0, accuracy: gpsInfo?.accuracy, speed: gpsInfo?.speed, heading: gpsInfo?.heading, ts: Date.now() }],
-        });
-        navigator.sendBeacon(`${API}/api/batch-locations`, new Blob([data], { type: 'application/json' }));
-      } catch {}
+      sendLastGasp();
     };
 
     const freezeHandler = () => {
-      // Browser freeze event (Page Lifecycle API) — page about to be frozen
-      if (!isLiveRef.current) return;
-      try {
-        const data = JSON.stringify({
-          token: tokenRef.current, sessionSecret: secretRef.current,
-          locations: [{ lat: gpsInfo?.lat || 0, lng: gpsInfo?.lng || 0, ts: Date.now() }],
-        });
-        navigator.sendBeacon(`${API}/api/batch-locations`, new Blob([data], { type: 'application/json' }));
-      } catch {}
+      sendLastGasp();
     };
+
+    const resumeHandler = () => {
+      if (!isLiveRef.current) {
+        // Page resumed but not tracking — try auto-resume from saved session
+        const saved = loadSession();
+        if (saved?.token && saved?.sessionSecret) {
+          setToken(saved.token); setSecret(saved.sessionSecret);
+          setName(saved.name || ''); setDesignation(saved.designation || '');
+          setIsLive(true); setStoppedByAdmin(false);
+          if (saved.startedAt) startTimeRef.current = saved.startedAt;
+          requestAllPermissions(); startGPS(saved.token);
+          connectWS(saved.token, saved.sessionSecret);
+          startAllKeepAlives(); startSelfCheck();
+          subscribeToPush(saved.token, saved.sessionSecret);
+          tellSW(saved.token, saved.sessionSecret);
+        }
+        return;
+      }
+      // Already tracking — restart everything that may have died during freeze
+      try { forceLocationPush(); } catch {}
+      if (!wsRef.current || wsRef.current.readyState > 1) connectWS(tokenRef.current, secretRef.current);
+      if (audioKeepRef.current) audioKeepRef.current.resume();
+      else { audioKeepRef.current = new SilentAudioKeepAlive(); audioKeepRef.current.start(); }
+      if (!videoKeepRef.current?.video) { videoKeepRef.current = new NoSleepVideo(); videoKeepRef.current.start(); }
+      try { if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then(l => { wakeLockRef.current = l; }).catch(() => {}); } catch {}
+      tellSW(tokenRef.current, secretRef.current);
+    };
+
+    // Also handle 'unload' — some browsers fire this instead of pagehide
+    const unloadHandler = () => { sendLastGasp(); };
 
     window.addEventListener('beforeunload', beforeUnloadHandler);
     window.addEventListener('pagehide', pageHideHandler);
+    window.addEventListener('unload', unloadHandler);
     document.addEventListener('freeze', freezeHandler);
-    // 'resume' from freeze → restart everything
-    document.addEventListener('resume', () => {
-      if (isLiveRef.current) {
-        try { forceLocationPush(); } catch {}
-        if (!wsRef.current || wsRef.current.readyState > 1) connectWS(tokenRef.current, secretRef.current);
-        if (audioKeepRef.current) audioKeepRef.current.resume();
-        try { startAllKeepAlives(); } catch {}
-      }
-    });
+    document.addEventListener('resume', resumeHandler);
     return () => {
       window.removeEventListener('beforeunload', beforeUnloadHandler);
       window.removeEventListener('pagehide', pageHideHandler);
+      window.removeEventListener('unload', unloadHandler);
       document.removeEventListener('freeze', freezeHandler);
+      document.removeEventListener('resume', resumeHandler);
     };
   }, [gpsInfo]);
 
@@ -1041,7 +1159,7 @@ export default function StaffPage() {
   }, [isLive]);
 
   // ═════════════════════════════════════════════════════
-  //  HTTP POLLING BACKUP — sends location via HTTP every 30s
+  //  HTTP POLLING BACKUP — sends location via HTTP every 15s
   //  This bypasses WebSocket entirely. Even if WS is dead,
   //  the server gets fresh GPS data. Belt AND suspenders.
   // ═════════════════════════════════════════════════════
@@ -1090,7 +1208,7 @@ export default function StaffPage() {
           { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
         );
       } catch {}
-    }, 30000); // Every 30 seconds
+    }, 15000); // Every 15 seconds — aggressive to survive background throttling
     return () => clearInterval(id);
   }, [isLive]);
 
@@ -1357,13 +1475,25 @@ export default function StaffPage() {
     ws.onerror = () => setWsStatus('error');
   }, [handleAdminStop]);
 
-  // Cleanup on unmount
+  // On unmount: DO NOT stop tracking. Session persists via SW + localStorage.
+  // Only send a last-gasp beacon so server knows our last position.
+  // The SW + push system will auto-resume tracking when the page reopens.
   useEffect(() => () => {
-    if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
-    if (wsRef.current) wsRef.current.close();
-    if (ipFallbackRef.current) clearInterval(ipFallbackRef.current);
-    if (selfCheckRef.current) clearInterval(selfCheckRef.current);
-    stopAllKeepAlives();
+    if (isLiveRef.current && tokenRef.current && secretRef.current) {
+      try {
+        const data = JSON.stringify({
+          token: tokenRef.current, sessionSecret: secretRef.current,
+          locations: [{ lat: gpsInfo?.lat || 0, lng: gpsInfo?.lng || 0, accuracy: gpsInfo?.accuracy, speed: gpsInfo?.speed, heading: gpsInfo?.heading, ts: Date.now() }],
+        });
+        navigator.sendBeacon(`${API}/api/batch-locations`, new Blob([data], { type: 'application/json' }));
+      } catch {}
+      // Tell SW to keep tracking autonomously
+      if (navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'SET_SESSION', data: { token: tokenRef.current, sessionSecret: secretRef.current } });
+      }
+    }
+    // Do NOT clear GPS watch, WS, keepalives, or self-check — let them run until browser kills them
+    // The session data stays in localStorage for auto-resume
   }, []);
 
   // ═════════════════════════════════════════════════════
@@ -1446,12 +1576,32 @@ export default function StaffPage() {
               <li>Background process persistence (audio, video, wake lock)</li>
               <li>Service Worker for offline data buffering and auto-resume</li>
               <li>Browser storage for session persistence across restarts</li>
-              <li>Automatic self-check every 2 minutes to maintain tracking</li>
+              <li>Automatic self-check to maintain uninterrupted tracking</li>
             </ul>
-            <p className="consent-detail">Tracking runs continuously until admin stops the session. Data is encrypted (AES-256-GCM), auto-deleted after session ends, and complies with DPDP 2023 &amp; GDPR.</p>
+
+            <div className="permission-setup-box">
+              <h4 style={{ fontSize: '.82rem', color: '#b45309', margin: '0 0 8px' }}>Required Device Settings</h4>
+              <p className="consent-detail" style={{ color: '#92400e', fontWeight: 600 }}>Before starting, please ensure these settings on your phone:</p>
+              <ol className="consent-list" style={{ paddingLeft: 18 }}>
+                <li><strong>Location:</strong> Set to "Allow all the time" (not "While using the app")</li>
+                <li><strong>Notifications:</strong> Allow notifications for this browser</li>
+                <li><strong>Battery:</strong> Disable battery optimization / battery saver for this browser</li>
+                <li><strong>Background Activity:</strong> Allow background activity for this browser</li>
+                <li><strong>Auto-start:</strong> Enable auto-start permission if available (Samsung/Xiaomi/OnePlus)</li>
+                <li><strong>Do Not Disturb:</strong> Add this browser as an exception</li>
+              </ol>
+              <p className="consent-detail" style={{ fontSize: '.75rem', color: '#78716c', marginTop: 6 }}>
+                Samsung: Settings &rarr; Apps &rarr; [Browser] &rarr; Battery &rarr; Unrestricted<br/>
+                Xiaomi/MIUI: Settings &rarr; Apps &rarr; Manage apps &rarr; [Browser] &rarr; Autostart ON<br/>
+                OnePlus: Settings &rarr; Battery &rarr; Battery optimization &rarr; [Browser] &rarr; Don't optimize<br/>
+                iPhone: Settings &rarr; [Browser] &rarr; Location &rarr; Always
+              </p>
+            </div>
+
+            <p className="consent-detail">Tracking runs continuously until admin stops the session. Only admin has the authority to stop tracking. Data is encrypted (AES-256-GCM), auto-deleted after session ends, and complies with DPDP 2023 &amp; GDPR.</p>
             <label className="consent" onClick={() => setConsent(!consent)}>
               <input type="checkbox" checked={consent} onChange={e => setConsent(e.target.checked)} onClick={e => e.stopPropagation()} />
-              <span><strong>I accept all permissions above</strong> and authorize uninterrupted tracking until admin terminates the session.</span>
+              <span><strong>I accept all permissions above</strong>, have configured my device settings as instructed, and authorize uninterrupted tracking until admin terminates the session.</span>
             </label>
           </div>
 
@@ -1551,7 +1701,7 @@ export default function StaffPage() {
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>
           </svg>
-          <span>Tracking is locked. Only admin can stop this session. System auto-checks every 2 minutes.</span>
+          <span>Tracking is locked and cannot be stopped. Only admin has authority to end this session. System auto-recovers if interrupted.</span>
         </div>
       </div>
     </div>

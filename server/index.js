@@ -1224,71 +1224,103 @@ async function start() {
   }, 60 * 60_000);
 
   // ═══════════════════════════════════════════════════════
-  //  OFFLINE DETECTION — push notification to staff who go dark
-  //  Checks every 90s for active sessions with no update for >2 min.
-  //  Sends Web Push notification to wake up the device/browser.
+  //  PROACTIVE PUSH SYSTEM — keeps tracking alive on ALL devices
+  //
+  //  TWO LAYERS:
+  //  1) PROACTIVE: Push ALL active sessions every 60s if no update in 45s
+  //     This prevents tracking from EVER going dark by keeping SW alive.
+  //  2) REACTIVE: Immediately push sessions that go dark (no update >60s)
+  //     This is the fallback for when proactive push didn't wake the device.
+  //
+  //  Combined: tracking recovers within 60-90s max on any device.
   // ═══════════════════════════════════════════════════════
-  const pushSentRecently = new Map(); // token → lastPushTime (prevent push spam)
+  const pushSentRecently = new Map(); // token → lastPushTime
+
+  // Helper: send silent push to a session
+  async function sendSilentPush(token, reason) {
+    let sub = pushSubscriptions.get(token);
+    // Fallback: load from DB if not in memory (survives server restarts)
+    if (!sub) {
+      try {
+        const dbSub = await db.query(
+          `SELECT push_subscription FROM tracking_sessions WHERE token=$1`, [token]);
+        if (dbSub.rows[0]?.push_subscription) {
+          sub = typeof dbSub.rows[0].push_subscription === 'string'
+            ? JSON.parse(dbSub.rows[0].push_subscription)
+            : dbSub.rows[0].push_subscription;
+          pushSubscriptions.set(token, sub); // cache in memory
+        }
+      } catch { /* ignore */ }
+    }
+    if (!sub) return false;
+
+    // Rate limit: don't push more than once every 55s per session
+    const lastPush = pushSentRecently.get(token) || 0;
+    if (Date.now() - lastPush < 55_000) return false;
+
+    try {
+      await webpush.sendNotification(sub, JSON.stringify({
+        title: 'Varolyn Healthcare',
+        body: 'Tracking active',
+        token,
+        action: 'silent_resume',
+        silent: true,
+        reason,
+      }));
+      pushSentRecently.set(token, Date.now());
+      return true;
+    } catch (pushErr) {
+      if (pushErr.statusCode === 410 || pushErr.statusCode === 404) {
+        pushSubscriptions.delete(token);
+        try { await db.query(`UPDATE tracking_sessions SET push_subscription=NULL WHERE token=$1`, [token]); } catch {}
+      }
+      console.warn(`[PUSH] Failed for ${token} (${reason}):`, pushErr.message);
+      return false;
+    }
+  }
+
+  // LAYER 1: PROACTIVE — push ALL active sessions every 60s if stale >45s
+  // This keeps SW alive and prevents tracking from going dark
   setInterval(async () => {
     try {
       const { rows } = await db.query(
         `SELECT token FROM tracking_sessions
          WHERE status = 'active'
            AND last_update IS NOT NULL
-           AND last_update < NOW() - INTERVAL '2 minutes'`
+           AND last_update < NOW() - INTERVAL '45 seconds'`
+      );
+      let pushed = 0;
+      for (const row of rows) {
+        const ok = await sendSilentPush(row.token, 'proactive_keepalive');
+        if (ok) pushed++;
+      }
+      if (pushed > 0) console.log(`[PROACTIVE] Pushed ${pushed}/${rows.length} stale sessions`);
+    } catch (e) {
+      console.warn('[PROACTIVE-PUSH] Error:', e.message);
+    }
+  }, 60_000); // Every 60 seconds
+
+  // LAYER 2: REACTIVE — push sessions that went dark (>60s no update)
+  // Runs more frequently for faster recovery
+  setInterval(async () => {
+    try {
+      const { rows } = await db.query(
+        `SELECT token FROM tracking_sessions
+         WHERE status = 'active'
+           AND last_update IS NOT NULL
+           AND last_update < NOW() - INTERVAL '60 seconds'`
       );
       for (const row of rows) {
-        let sub = pushSubscriptions.get(row.token);
-        // Fallback: load from DB if not in memory (survives server restarts)
-        if (!sub) {
-          try {
-            const dbSub = await db.query(
-              `SELECT push_subscription FROM tracking_sessions WHERE token=$1`, [row.token]);
-            if (dbSub.rows[0]?.push_subscription) {
-              sub = typeof dbSub.rows[0].push_subscription === 'string'
-                ? JSON.parse(dbSub.rows[0].push_subscription)
-                : dbSub.rows[0].push_subscription;
-              pushSubscriptions.set(row.token, sub); // cache in memory
-            }
-          } catch (e) { /* ignore */ }
-        }
-        if (!sub) continue;
-
-        // Don't push more than once every 2 minutes per session (aggressive recovery)
-        const lastPush = pushSentRecently.get(row.token) || 0;
-        if (Date.now() - lastPush < 2 * 60 * 1000) continue;
-
-        try {
-          // GHOST PROTOCOL: silent push — SW handles everything automatically.
-          // NO "tap to resume" — the SW wakes up, sends heartbeat, flushes buffer,
-          // and auto-opens/focuses the page. Staff does NOTHING.
-          await webpush.sendNotification(sub, JSON.stringify({
-            title: 'Varolyn Healthcare',
-            body: 'Tracking active',         // Neutral message (not alarming)
-            token: row.token,
-            action: 'silent_resume',          // SW knows to auto-handle
-            silent: true,                     // Tells SW to suppress alert
-          }));
-          pushSentRecently.set(row.token, Date.now());
-          console.log(`[GHOST] Silent push sent for session ${row.token}`);
-        } catch (pushErr) {
-          // 410 Gone = subscription expired, clean up
-          if (pushErr.statusCode === 410 || pushErr.statusCode === 404) {
-            pushSubscriptions.delete(row.token);
-            // Also clear from DB
-            try { await db.query(`UPDATE tracking_sessions SET push_subscription=NULL WHERE token=$1`, [row.token]); } catch {}
-          }
-          console.warn(`[PUSH] Failed for ${row.token}:`, pushErr.message);
-        }
-      }
-      // Clean up old push timestamps
-      for (const [tok, ts] of pushSentRecently) {
-        if (Date.now() - ts > 30 * 60 * 1000) pushSentRecently.delete(tok);
+        await sendSilentPush(row.token, 'offline_recovery');
       }
     } catch (e) {
-      console.warn('[OFFLINE-DETECT] Error:', e.message);
+      console.warn('[REACTIVE-PUSH] Error:', e.message);
     }
-  }, 90_000);
+    // Clean up old push timestamps
+    for (const [tok, ts] of pushSentRecently) {
+      if (Date.now() - ts > 30 * 60 * 1000) pushSentRecently.delete(tok);
+    }
+  }, 45_000); // Every 45 seconds
 
   const shutdown = async () => {
     await server.close(); await redisPub.quit(); await redisSub.quit(); await db.end(); process.exit(0);

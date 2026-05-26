@@ -905,6 +905,24 @@ body {
   font-weight: 700;
 }
 
+.permission-setup-box {
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin: 12px 0;
+}
+.permission-setup-box ol {
+  list-style: decimal;
+  margin: 0 0 8px 0;
+}
+.permission-setup-box ol li {
+  font-size: .76rem;
+  color: #78716c;
+  padding: 2px 0;
+  line-height: 1.5;
+}
+
 /* ═══════════════════════════════════════════════════════ */
 /*  SELF-CHECK BAR                                         */
 /* ═══════════════════════════════════════════════════════ */
