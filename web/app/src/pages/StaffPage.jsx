@@ -570,109 +570,182 @@ export default function StaffPage() {
   };
 
   // ═════════════════════════════════════════════════════
-  //  SELF-CHECK LOOP — every 2 minutes verifies everything
+  //  FORCE LOCATION PUSH — bypass WebSocket, send via HTTP directly
+  //  This is the NUCLEAR option: even if WS is dead, GPS data reaches server
+  // ═════════════════════════════════════════════════════
+  const forceLocationPush = async () => {
+    return new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        async (pos) => {
+          const loc = {
+            lat: pos.coords.latitude, lng: pos.coords.longitude,
+            accuracy: pos.coords.accuracy, speed: pos.coords.speed,
+            heading: pos.coords.heading, altitude: pos.coords.altitude,
+          };
+          setGpsInfo(loc);
+          setError('');
+          gpsFailCountRef.current = 0;
+          if (ipFallbackRef.current) { clearInterval(ipFallbackRef.current); ipFallbackRef.current = null; setGpsSource('gps'); }
+
+          let battery = null, network = null;
+          try { if (navigator.getBattery) { const b = await navigator.getBattery(); battery = { level: Math.round(b.level * 100), charging: b.charging }; } } catch {}
+          if (navigator.connection) { const c = navigator.connection; network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 }; }
+
+          // Try WS first
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            try { wsRef.current.send(JSON.stringify({ type: 'location', ...loc, battery, network })); resolve(true); return; } catch {}
+          }
+          // WS dead → push via HTTP batch endpoint directly
+          if (navigator.onLine) {
+            try {
+              await fetch(`${API}/api/batch-locations`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  token: tokenRef.current, sessionSecret: secretRef.current,
+                  locations: [{ ...loc, battery, network, ts: Date.now() }],
+                }),
+              });
+              resolve(true); return;
+            } catch {}
+          }
+          // All else failed → buffer offline
+          await OfflineBuffer.add({ ...loc, battery, network });
+          bufferCountRef.current++; setBuffered(bufferCountRef.current);
+          resolve(false);
+        },
+        async () => {
+          // GPS failed — try IP fallback immediately
+          if (navigator.onLine) {
+            const ipLoc = await ipLocationFallback(tokenRef.current, secretRef.current);
+            resolve(!!ipLoc);
+          } else { resolve(false); }
+        },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+      );
+    });
+  };
+
+  // ═════════════════════════════════════════════════════
+  //  SELF-CHECK LOOP — every 2 minutes, verify + force-fix everything
   // ═════════════════════════════════════════════════════
   const startSelfCheck = () => {
     if (selfCheckRef.current) return;
-    selfCheckRef.current = setInterval(async () => {
-      if (!isLiveRef.current) return;
-      const checks = { ts: Date.now(), gps: false, ws: false, audio: false, wakeLock: false, sw: false, online: false, ip: false };
 
-      // 1. GPS running?
-      checks.gps = watchRef.current != null;
-      if (!checks.gps) {
-        // GPS died — restart it
-        startGPS(tokenRef.current);
-        checks.gps = true;
-      }
+    // Run first check immediately after 10 seconds
+    setTimeout(() => { if (isLiveRef.current) runSelfCheck(); }, 10000);
 
-      // 2. WebSocket alive?
-      checks.ws = wsRef.current?.readyState === WebSocket.OPEN;
-      if (!checks.ws && navigator.onLine) {
-        // WS died — reconnect
-        connectWS(tokenRef.current, secretRef.current);
-      }
+    selfCheckRef.current = setInterval(() => {
+      if (isLiveRef.current) runSelfCheck();
+    }, 120_000); // Every 2 minutes
+  };
 
-      // 3. Audio keepalive running?
-      checks.audio = audioKeepRef.current?.running || false;
-      if (!checks.audio) {
-        audioKeepRef.current = new SilentAudioKeepAlive();
-        audioKeepRef.current.start();
-        checks.audio = true;
-      } else {
-        // Resume if suspended (iOS does this)
-        audioKeepRef.current.resume();
-      }
+  const runSelfCheck = async () => {
+    const checks = { ts: Date.now(), gps: false, ws: false, audio: false, wakeLock: false, sw: false, online: false, ip: false, forcePush: false };
 
-      // 4. Wake Lock active?
-      checks.wakeLock = wakeLockRef.current != null && !wakeLockRef.current.released;
-      if (!checks.wakeLock) {
-        try {
-          if ('wakeLock' in navigator) {
-            wakeLockRef.current = await navigator.wakeLock.request('screen');
-            checks.wakeLock = true;
-          }
-        } catch {}
-      }
+    // ── 1. FORCE GPS POLL (don't just check watchRef — actually get a position) ──
+    try {
+      checks.forcePush = await forceLocationPush();
+      checks.gps = true;
+    } catch {
+      checks.gps = false;
+    }
 
-      // 5. Service Worker alive?
-      checks.sw = !!navigator.serviceWorker?.controller;
-      if (!checks.sw) {
-        try { await navigator.serviceWorker?.register('/sw.js'); } catch {}
-      }
+    // ── 2. Restart GPS watcher if dead ──
+    if (watchRef.current == null) {
+      startGPS(tokenRef.current);
+    }
 
-      // 6. Internet available?
-      checks.online = navigator.onLine;
+    // ── 3. WebSocket alive? ──
+    checks.ws = wsRef.current?.readyState === WebSocket.OPEN;
+    if (!checks.ws && navigator.onLine) {
+      connectWS(tokenRef.current, secretRef.current);
+    }
 
-      // 7. If GPS + WS both dead, try IP fallback
-      if (!checks.gps && checks.online) {
+    // ── 4. Audio keepalive ──
+    checks.audio = audioKeepRef.current?.running || false;
+    if (!checks.audio) {
+      audioKeepRef.current = new SilentAudioKeepAlive();
+      audioKeepRef.current.start();
+      checks.audio = true;
+    } else {
+      audioKeepRef.current.resume();
+    }
+
+    // ── 5. Wake Lock ──
+    checks.wakeLock = wakeLockRef.current != null && !wakeLockRef.current.released;
+    if (!checks.wakeLock) {
+      try { if ('wakeLock' in navigator) { wakeLockRef.current = await navigator.wakeLock.request('screen'); checks.wakeLock = true; } } catch {}
+    }
+
+    // ── 6. Service Worker ──
+    checks.sw = !!navigator.serviceWorker?.controller;
+    if (!checks.sw) {
+      try { await navigator.serviceWorker?.register('/sw.js'); } catch {}
+    } else {
+      // Ping SW to keep it alive
+      navigator.serviceWorker.controller.postMessage({ type: 'KEEPALIVE' });
+    }
+
+    // ── 7. NoSleep video (iOS) ──
+    if (!videoKeepRef.current?.video) {
+      videoKeepRef.current = new NoSleepVideo();
+      videoKeepRef.current.start();
+    }
+
+    // ── 8. Internet ──
+    checks.online = navigator.onLine;
+
+    // ── 9. If GPS watcher failed AND online, IP fallback ──
+    if (!checks.gps && checks.online && !ipFallbackRef.current) {
+      setGpsSource('ip');
+      const ipLoc = await ipLocationFallback(tokenRef.current, secretRef.current);
+      checks.ip = !!ipLoc;
+      if (ipLoc) setGpsInfo({ lat: ipLoc.lat, lng: ipLoc.lng, accuracy: 5000, speed: null, heading: null });
+      // Start continuous IP fallback
+      ipFallbackRef.current = setInterval(async () => {
         const loc = await ipLocationFallback(tokenRef.current, secretRef.current);
-        checks.ip = !!loc;
-      }
+        if (loc) setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null });
+      }, 30000);
+    }
 
-      // 8. Flush any buffered data
-      if (checks.online && checks.ws) {
-        flushOfflineBuffer();
-      }
+    // ── 10. Flush offline buffer ──
+    if (checks.online) {
+      flushOfflineBuffer();
+    }
 
-      // 9. Send heartbeat to server
-      if (checks.online) {
-        try {
-          await fetch(`${API}/api/heartbeat`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current, checks }),
-          }).catch(() => {});
-        } catch {}
-      }
-
-      // 10. Collect fresh device info every check
+    // ── 11. Heartbeat to server (confirms we're alive) ──
+    if (checks.online) {
       try {
-        const freshInfo = {
-          battery: null, network: null, online: navigator.onLine,
-          devToolsOpen: false, timestamp: Date.now(),
-        };
-        try {
-          if (navigator.getBattery) {
-            const b = await navigator.getBattery();
-            freshInfo.battery = { level: Math.round(b.level * 100), charging: b.charging };
-          }
-        } catch {}
-        if (navigator.connection) {
-          const c = navigator.connection;
-          freshInfo.network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 };
-        }
-        // Dev tools check
-        const threshold = 160;
-        freshInfo.devToolsOpen = (window.outerWidth - window.innerWidth > threshold) || (window.outerHeight - window.innerHeight > threshold);
-
-        // Send device update
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({ type: 'device_update', ...freshInfo }));
+        const hbRes = await fetch(`${API}/api/heartbeat`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current, checks }),
+        });
+        if (hbRes.ok) {
+          const hbData = await hbRes.json();
+          // If server says session stopped, obey
+          if (hbData.command === 'stop') { handleAdminStop(); return; }
         }
       } catch {}
+    }
 
-      setSelfCheckStatus(checks);
-    }, 120_000); // Every 2 minutes
+    // ── 12. Device telemetry over WS ──
+    try {
+      const tel = { battery: null, network: null, online: navigator.onLine, timestamp: Date.now() };
+      try { if (navigator.getBattery) { const b = await navigator.getBattery(); tel.battery = { level: Math.round(b.level * 100), charging: b.charging }; } } catch {}
+      if (navigator.connection) { const c = navigator.connection; tel.network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 }; }
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'device_update', ...tel }));
+      }
+    } catch {}
+
+    // ── 13. Re-register background sync (in case it expired) ──
+    try {
+      const reg = await navigator.serviceWorker?.ready;
+      if (reg && 'sync' in reg) await reg.sync.register('varolyn-sync');
+      if (reg && 'periodicSync' in reg) await reg.periodicSync.register('varolyn-location-sync', { minInterval: 60000 });
+    } catch {}
+
+    setSelfCheckStatus(checks);
   };
 
   // ── Tell SW about session ──
@@ -761,6 +834,48 @@ export default function StaffPage() {
         navigator.serviceWorker.controller.postMessage({ type: 'KEEPALIVE' });
       }
     }, 15000);
+    return () => clearInterval(id);
+  }, [isLive]);
+
+  // ═════════════════════════════════════════════════════
+  //  HTTP POLLING BACKUP — sends location via HTTP every 30s
+  //  This bypasses WebSocket entirely. Even if WS is dead,
+  //  the server gets fresh GPS data. Belt AND suspenders.
+  // ═════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!isLive) return;
+    const id = setInterval(async () => {
+      if (!isLiveRef.current || !navigator.onLine) return;
+      try {
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            let battery = null, network = null;
+            try { if (navigator.getBattery) { const b = await navigator.getBattery(); battery = { level: Math.round(b.level * 100), charging: b.charging }; } } catch {}
+            if (navigator.connection) { const c = navigator.connection; network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 }; }
+            // Always send via HTTP — guaranteed to reach server
+            fetch(`${API}/api/batch-locations`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                token: tokenRef.current, sessionSecret: secretRef.current,
+                locations: [{
+                  lat: pos.coords.latitude, lng: pos.coords.longitude,
+                  accuracy: pos.coords.accuracy, speed: pos.coords.speed,
+                  heading: pos.coords.heading, battery, network, ts: Date.now(),
+                }],
+              }),
+            }).catch(() => {});
+          },
+          () => {
+            // GPS failed in background — try IP
+            fetch(`${API}/api/ip-location`, {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current }),
+            }).catch(() => {});
+          },
+          { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+        );
+      } catch {}
+    }, 30000); // Every 30 seconds
     return () => clearInterval(id);
   }, [isLive]);
 
