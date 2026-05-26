@@ -1,4 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import maplibregl from 'maplibre-gl';
+import 'maplibre-gl/dist/maplibre-gl.css';
 
 const API = '';
 
@@ -15,121 +17,97 @@ const DURATION_OPTIONS = [
   { label: 'Custom',    value: 0 },
 ];
 
+const MOVEMENT_LABELS = {
+  idle: 'Idle', walking: 'Walking', slow_vehicle: 'Slow Vehicle',
+  vehicle: 'Vehicle', suspicious_speed: 'Suspicious Speed', unknown: 'Unknown',
+};
+const MOVEMENT_COLORS = {
+  idle: '#ef4444', walking: '#22c55e', slow_vehicle: '#f59e0b',
+  vehicle: '#3b82f6', suspicious_speed: '#dc2626', unknown: '#9ca3af',
+};
+const SEVERITY_COLORS = { critical: '#dc2626', high: '#f97316', medium: '#f59e0b', low: '#3b82f6' };
+
 export default function DashboardPage() {
-  // ── Auth state ──
   const [jwt, setJwt]             = useState(() => localStorage.getItem('varolyn_admin_jwt') || '');
   const [loginEmail, setLoginEmail]   = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError]   = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
 
-  // ── Dashboard state ──
   const [sessions, setSessions] = useState([]);
+  const [alerts, setAlerts]     = useState([]);
   const [loading, setLoading]   = useState(true);
   const [toast, setToast]       = useState('');
+  const [view, setView]         = useState('cards'); // 'cards' | 'heatmap'
 
   const isLoggedIn = !!jwt;
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 2500); };
 
-  // ── Login handler ──
   const handleLogin = async (e) => {
     e.preventDefault();
     setLoginError('');
-    if (!loginEmail.trim() || !loginPassword.trim())
-      return setLoginError('Email and password are required');
-
+    if (!loginEmail.trim() || !loginPassword.trim()) return setLoginError('Email and password are required');
     setLoginLoading(true);
     try {
       const res = await fetch(`${API}/api/admin/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: loginEmail.trim(), password: loginPassword }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Login failed');
-
       localStorage.setItem('varolyn_admin_jwt', data.token);
-      setJwt(data.token);
-      setLoginEmail('');
-      setLoginPassword('');
-    } catch (err) {
-      setLoginError(err.message);
-    } finally {
-      setLoginLoading(false);
-    }
+      setJwt(data.token); setLoginEmail(''); setLoginPassword('');
+    } catch (err) { setLoginError(err.message); }
+    finally { setLoginLoading(false); }
   };
 
-  // ── Logout ──
-  const handleLogout = () => {
-    localStorage.removeItem('varolyn_admin_jwt');
-    setJwt('');
-    setSessions([]);
-  };
+  const handleLogout = () => { localStorage.removeItem('varolyn_admin_jwt'); setJwt(''); setSessions([]); setAlerts([]); };
 
-  // ── Fetch dashboard (protected by JWT) ──
   const fetchDashboard = useCallback(async () => {
     if (!jwt) return;
     try {
-      const res = await fetch(`${API}/api/dashboard`, {
-        headers: { Authorization: `Bearer ${jwt}` },
-      });
+      const res = await fetch(`${API}/api/dashboard`, { headers: { Authorization: `Bearer ${jwt}` } });
       if (res.status === 401 || res.status === 403) {
-        // JWT expired/invalid — force logout and show login
-        localStorage.removeItem('varolyn_admin_jwt');
-        setJwt('');
-        setSessions([]);
-        setLoading(false);
-        return;
+        localStorage.removeItem('varolyn_admin_jwt'); setJwt(''); setSessions([]); setAlerts([]); setLoading(false); return;
       }
       const data = await res.json();
       setSessions(data.sessions || []);
-    } catch (err) {
-      console.warn('[Dashboard] Fetch error:', err.message);
-    }
+      setAlerts(data.alerts || []);
+    } catch (err) { console.warn('[Dashboard] Fetch error:', err.message); }
     setLoading(false);
   }, [jwt]);
 
   useEffect(() => {
     if (!isLoggedIn) { setLoading(false); return; }
-    setLoading(true);
-    fetchDashboard();
+    setLoading(true); fetchDashboard();
     const id = setInterval(fetchDashboard, 5000);
     return () => clearInterval(id);
   }, [fetchDashboard, isLoggedIn]);
 
-  // ── Admin force-stop ──
   const adminStopSession = async (token) => {
     if (!window.confirm('Stop tracking for this staff member?')) return;
     try {
       const res = await fetch(`${API}/api/admin/stop-session`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
         body: JSON.stringify({ token }),
       });
       if (res.ok) { showToast('Session stopped'); fetchDashboard(); }
     } catch {}
   };
 
-  // ── Admin update duration ──
   const updateDuration = async (token, hours) => {
     try {
       const res = await fetch(`${API}/api/admin/update-duration`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
         body: JSON.stringify({ token, hours }),
       });
       if (res.ok) { showToast(`Duration updated to ${hours}h`); fetchDashboard(); }
     } catch {}
   };
 
-  // ── Share handlers (admin only) ──
   const getTrackUrl = (token) => `${window.location.origin}/track/${token}`;
-
-  const copyLink = (token) => {
-    navigator.clipboard.writeText(getTrackUrl(token)).then(() => showToast('Tracking link copied!'));
-  };
-
+  const copyLink = (token) => { navigator.clipboard.writeText(getTrackUrl(token)).then(() => showToast('Tracking link copied!')); };
   const shareWhatsApp = (token, staffName, recipientPhone) => {
     const url = getTrackUrl(token);
     const p = (recipientPhone || '').replace(/\D/g, '');
@@ -137,12 +115,10 @@ export default function DashboardPage() {
     if (p) window.open(`https://wa.me/${p}?text=${msg}`, '_blank');
     else window.open(`https://wa.me/?text=${msg}`, '_blank');
   };
-
   const shareGeneric = async (token, staffName) => {
     const url = getTrackUrl(token);
-    if (navigator.share) {
-      try { await navigator.share({ title: `Track ${staffName} — Varolyn Healthcare`, url }); } catch {}
-    } else copyLink(token);
+    if (navigator.share) { try { await navigator.share({ title: `Track ${staffName} — Varolyn Healthcare`, url }); } catch {} }
+    else copyLink(token);
   };
 
   const timeAgo = (dt) => {
@@ -153,83 +129,51 @@ export default function DashboardPage() {
     if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
     return `${Math.floor(sec / 3600)}h ago`;
   };
-
   const timeUntil = (dt) => {
     if (!dt) return '';
     const ms = new Date(dt).getTime() - Date.now();
     if (ms <= 0) return 'Expired';
-    const h = Math.floor(ms / 3600000);
-    const m = Math.floor((ms % 3600000) / 60000);
+    const h = Math.floor(ms / 3600000); const m = Math.floor((ms % 3600000) / 60000);
     if (h > 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
     if (h > 0) return `${h}h ${m}m`;
     return `${m}m`;
   };
 
   // ══════════════════════════════════════════════════════
-  //  RENDER: LOGIN GATE
+  //  LOGIN
   // ══════════════════════════════════════════════════════
   if (!isLoggedIn) {
     return (
       <div className="page">
-        <div className="brand">
-          <h1>Varolyn Healthcare</h1>
-          <p>Admin Dashboard</p>
-        </div>
+        <div className="brand"><h1>Varolyn Healthcare</h1><p>Admin Dashboard</p></div>
         <div className="card">
           <div className="login-header">
             <div className="login-icon">
               <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="var(--teal)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
-                <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
-                <circle cx="12" cy="16" r="1"/>
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/><circle cx="12" cy="16" r="1"/>
               </svg>
             </div>
             <h2 className="login-title">Admin Login</h2>
             <p className="login-subtitle">Authorized personnel only</p>
           </div>
-
           {loginError && <div className="error-msg">{loginError}</div>}
-
           <form onSubmit={handleLogin}>
-            <div className="field">
-              <label>Email</label>
-              <input
-                type="email"
-                placeholder="admin@varolynhealthcare.com"
-                value={loginEmail}
-                onChange={e => setLoginEmail(e.target.value)}
-                autoComplete="email"
-                autoFocus
-              />
-            </div>
-            <div className="field">
-              <label>Password</label>
-              <input
-                type="password"
-                placeholder="Enter password"
-                value={loginPassword}
-                onChange={e => setLoginPassword(e.target.value)}
-                autoComplete="current-password"
-              />
-            </div>
-            <button className="btn btn-primary" type="submit" disabled={loginLoading}>
-              {loginLoading ? 'Signing in...' : 'Sign In'}
-            </button>
+            <div className="field"><label>Email</label><input type="email" placeholder="admin@varolynhealthcare.com" value={loginEmail} onChange={e => setLoginEmail(e.target.value)} autoComplete="email" autoFocus /></div>
+            <div className="field"><label>Password</label><input type="password" placeholder="Enter password" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} autoComplete="current-password" /></div>
+            <button className="btn btn-primary" type="submit" disabled={loginLoading}>{loginLoading ? 'Signing in...' : 'Sign In'}</button>
           </form>
-
-          <p className="login-footer">
-            Protected by AES-256 encryption, JWT authentication, and rate limiting.
-          </p>
+          <p className="login-footer">Protected by AES-256 encryption, JWT authentication, and rate limiting.</p>
         </div>
       </div>
     );
   }
 
   // ══════════════════════════════════════════════════════
-  //  RENDER: DASHBOARD
+  //  DASHBOARD
   // ══════════════════════════════════════════════════════
   const activeSessions = sessions.filter(s => s.status === 'active');
   const pastSessions   = sessions.filter(s => s.status !== 'active');
+  const criticalAlerts = alerts.filter(a => a.severity === 'critical');
 
   return (
     <div className="dash-page">
@@ -237,30 +181,61 @@ export default function DashboardPage() {
       <div className="dash-header" style={{ background: 'var(--teal)', color: '#fff', borderRadius: 'var(--radius)', padding: '16px 20px', marginBottom: 20 }}>
         <div>
           <h1 style={{ color: '#fff', fontSize: '1.3rem', margin: 0 }}>Varolyn Healthcare</h1>
-          <p style={{ color: 'rgba(255,255,255,0.8)', margin: '4px 0 0', fontSize: '.85rem' }}>Admin Control Center</p>
+          <p style={{ color: 'rgba(255,255,255,0.8)', margin: '4px 0 0', fontSize: '.85rem' }}>Intelligence Command Center</p>
         </div>
         <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
           <button className="btn-logout" onClick={handleLogout} title="Sign out">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
-              <polyline points="16 17 21 12 16 7"/>
-              <line x1="21" y1="12" x2="9" y2="12"/>
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
             </svg>
           </button>
         </div>
       </div>
 
-      {/* Stats */}
+      {/* Stats Row */}
       <div className="dash-stats">
-        <div className="stat-card">
-          <span className="stat-num">{activeSessions.length}</span>
-          <span className="stat-label">Live Now</span>
-        </div>
-        <div className="stat-card">
-          <span className="stat-num">{sessions.length}</span>
-          <span className="stat-label">Total Sessions</span>
+        <div className="stat-card"><span className="stat-num">{activeSessions.length}</span><span className="stat-label">Live Now</span></div>
+        <div className="stat-card"><span className="stat-num">{sessions.length}</span><span className="stat-label">Total</span></div>
+        <div className="stat-card" style={criticalAlerts.length > 0 ? { borderColor: '#dc2626', background: '#fef2f2' } : {}}>
+          <span className="stat-num" style={criticalAlerts.length > 0 ? { color: '#dc2626' } : {}}>{alerts.length}</span>
+          <span className="stat-label">Alerts</span>
         </div>
       </div>
+
+      {/* View Toggle */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+        <button className={`ctrl-btn ${view === 'cards' ? 'ctrl-share' : ''}`} onClick={() => setView('cards')} style={view === 'cards' ? { background: 'var(--teal)', color: '#fff' } : {}}>
+          Staff Cards
+        </button>
+        <button className={`ctrl-btn ${view === 'heatmap' ? 'ctrl-share' : ''}`} onClick={() => setView('heatmap')} style={view === 'heatmap' ? { background: 'var(--teal)', color: '#fff' } : {}}>
+          Heatmap View
+        </button>
+      </div>
+
+      {/* Intelligence Alerts Banner */}
+      {alerts.length > 0 && (
+        <div style={{ marginBottom: 16 }}>
+          <h3 style={{ fontSize: '.9rem', color: '#64748b', marginBottom: 8 }}>Intelligence Alerts</h3>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {alerts.slice(0, 8).map(a => {
+              const staffName = sessions.find(s => s.token === a.token)?.staffName || a.token;
+              return (
+                <div key={a.id} style={{
+                  display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
+                  background: a.severity === 'critical' ? '#fef2f2' : a.severity === 'high' ? '#fff7ed' : '#fffbeb',
+                  border: `1px solid ${SEVERITY_COLORS[a.severity] || '#e5e7eb'}`,
+                  borderRadius: 8, fontSize: '.82rem',
+                }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: SEVERITY_COLORS[a.severity], flexShrink: 0 }} />
+                  <span style={{ fontWeight: 600 }}>{safe(staffName)}</span>
+                  <span style={{ color: '#64748b' }}>{formatAlertType(a.alert_type)}</span>
+                  <span style={{ marginLeft: 'auto', color: '#9ca3af', fontSize: '.75rem' }}>{timeAgo(a.created_at)}</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {loading && (
         <div style={{ textAlign: 'center', padding: 60 }}>
@@ -269,43 +244,47 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* Active Staff Cards */}
-      {activeSessions.length > 0 && (
-        <>
-          <h2 className="dash-section-title">
-            <span className="pulse-dot" style={{ width: 8, height: 8 }} /> Active Staff
-          </h2>
-          <div className="dash-grid">
-            {activeSessions.map(s => (
-              <StaffCard
-                key={s.id} s={s} timeAgo={timeAgo} timeUntil={timeUntil}
-                onStop={adminStopSession} onCopy={copyLink}
-                onWhatsApp={shareWhatsApp} onShare={shareGeneric}
-                onUpdateDuration={updateDuration}
-              />
-            ))}
-          </div>
-        </>
+      {/* HEATMAP VIEW */}
+      {view === 'heatmap' && !loading && (
+        <HeatmapView sessions={activeSessions} allSessions={sessions} />
       )}
 
-      {/* Past Sessions */}
-      {pastSessions.length > 0 && (
+      {/* CARDS VIEW */}
+      {view === 'cards' && (
         <>
-          <h2 className="dash-section-title" style={{ marginTop: 32 }}>Past Sessions</h2>
-          <div className="dash-grid">
-            {pastSessions.map(s => (
-              <StaffCard key={s.id} s={s} timeAgo={timeAgo} timeUntil={timeUntil} past onCopy={copyLink} />
-            ))}
-          </div>
-        </>
-      )}
+          {activeSessions.length > 0 && (
+            <>
+              <h2 className="dash-section-title"><span className="pulse-dot" style={{ width: 8, height: 8 }} /> Active Staff</h2>
+              <div className="dash-grid">
+                {activeSessions.map(s => (
+                  <StaffCard key={s.id} s={s} timeAgo={timeAgo} timeUntil={timeUntil}
+                    onStop={adminStopSession} onCopy={copyLink}
+                    onWhatsApp={shareWhatsApp} onShare={shareGeneric}
+                    onUpdateDuration={updateDuration} />
+                ))}
+              </div>
+            </>
+          )}
 
-      {!loading && sessions.length === 0 && (
-        <div style={{ textAlign: 'center', padding: 60, color: '#9ca3af' }}>
-          <p style={{ fontSize: '3rem' }}>&#128225;</p>
-          <p>No tracking sessions yet.</p>
-          <p style={{ fontSize: '.85rem', marginTop: 8 }}>Staff will start sessions from their devices. Tracking links will appear here.</p>
-        </div>
+          {pastSessions.length > 0 && (
+            <>
+              <h2 className="dash-section-title" style={{ marginTop: 32 }}>Past Sessions</h2>
+              <div className="dash-grid">
+                {pastSessions.map(s => (
+                  <StaffCard key={s.id} s={s} timeAgo={timeAgo} timeUntil={timeUntil} past onCopy={copyLink} />
+                ))}
+              </div>
+            </>
+          )}
+
+          {!loading && sessions.length === 0 && (
+            <div style={{ textAlign: 'center', padding: 60, color: '#9ca3af' }}>
+              <p style={{ fontSize: '3rem' }}>&#128225;</p>
+              <p>No tracking sessions yet.</p>
+              <p style={{ fontSize: '.85rem', marginTop: 8 }}>Staff will start sessions from their devices.</p>
+            </div>
+          )}
+        </>
       )}
 
       {toast && <div className="toast">{toast}</div>}
@@ -313,19 +292,213 @@ export default function DashboardPage() {
   );
 }
 
-// ── Safe string renderer: NEVER pass objects/arrays to React ──
+// ══════════════════════════════════════════════════════
+//  HEATMAP VIEW — All staff on a single map with heatmap overlay
+//  Click any marker to see staff name + details
+// ══════════════════════════════════════════════════════
+function HeatmapView({ sessions, allSessions }) {
+  const mapContainer = useRef(null);
+  const mapRef = useRef(null);
+  const markersRef = useRef([]);
+
+  const staffWithLocation = allSessions.filter(s => s.location?.lat && s.location?.lng);
+
+  useEffect(() => {
+    if (!mapContainer.current || staffWithLocation.length === 0) return;
+
+    // Initialize map centered on first staff or India
+    const center = staffWithLocation.length > 0
+      ? [staffWithLocation[0].location.lng, staffWithLocation[0].location.lat]
+      : [78.9629, 20.5937]; // India center
+
+    if (!mapRef.current) {
+      mapRef.current = new maplibregl.Map({
+        container: mapContainer.current,
+        style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
+        center, zoom: 12, attributionControl: false,
+      });
+      mapRef.current.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+      mapRef.current.on('load', () => {
+        updateMapData();
+      });
+    } else {
+      updateMapData();
+    }
+
+    function updateMapData() {
+      const map = mapRef.current;
+      if (!map || !map.loaded()) return;
+
+      // Clear old markers
+      markersRef.current.forEach(m => m.remove());
+      markersRef.current = [];
+
+      // Build GeoJSON for heatmap
+      const features = staffWithLocation.map(s => ({
+        type: 'Feature',
+        properties: {
+          name: s.staffName, token: s.token, status: s.status,
+          movementState: s.movementState || 'unknown',
+          riskScore: s.riskScore || 0,
+          speed: s.location?.speed || 0,
+        },
+        geometry: { type: 'Point', coordinates: [s.location.lng, s.location.lat] },
+      }));
+
+      const geojson = { type: 'FeatureCollection', features };
+
+      // Update or add heatmap source
+      if (map.getSource('staff-heat')) {
+        map.getSource('staff-heat').setData(geojson);
+      } else {
+        map.addSource('staff-heat', { type: 'geojson', data: geojson });
+        // Heatmap layer
+        map.addLayer({
+          id: 'heatmap-layer', type: 'heatmap', source: 'staff-heat',
+          paint: {
+            'heatmap-weight': ['interpolate', ['linear'], ['get', 'riskScore'], 0, 0.3, 50, 0.7, 100, 1],
+            'heatmap-intensity': 1.2,
+            'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 8, 30, 14, 50],
+            'heatmap-opacity': 0.6,
+            'heatmap-color': [
+              'interpolate', ['linear'], ['heatmap-density'],
+              0, 'rgba(0,0,255,0)', 0.2, 'rgb(0,200,255)', 0.4, 'rgb(0,255,128)',
+              0.6, 'rgb(255,255,0)', 0.8, 'rgb(255,165,0)', 1, 'rgb(255,0,0)',
+            ],
+          },
+        });
+      }
+
+      // Add markers for each staff
+      for (const s of staffWithLocation) {
+        const isActive = s.status === 'active';
+        const mvColor = MOVEMENT_COLORS[s.movementState || 'unknown'];
+        const riskHigh = (s.riskScore || 0) > 40;
+
+        const el = document.createElement('div');
+        el.style.cssText = `
+          width:${isActive ? 32 : 22}px; height:${isActive ? 32 : 22}px;
+          border-radius:50%; cursor:pointer; position:relative;
+          background:${isActive ? mvColor : '#9ca3af'};
+          border:3px solid ${riskHigh ? '#dc2626' : '#fff'};
+          box-shadow:0 2px 8px rgba(0,0,0,0.3);
+          display:flex; align-items:center; justify-content:center;
+          font-size:12px; color:#fff; font-weight:700;
+        `;
+        el.textContent = (s.staffName || '?')[0].toUpperCase();
+
+        // Pulsing animation for active
+        if (isActive) {
+          const pulse = document.createElement('div');
+          pulse.style.cssText = `position:absolute;width:100%;height:100%;border-radius:50%;border:2px solid ${mvColor};animation:markerPulse 2s infinite;`;
+          el.appendChild(pulse);
+        }
+
+        // Risk badge
+        if (riskHigh) {
+          const badge = document.createElement('div');
+          badge.style.cssText = 'position:absolute;top:-4px;right:-4px;width:12px;height:12px;border-radius:50%;background:#dc2626;border:2px solid #fff;';
+          el.appendChild(badge);
+        }
+
+        const popup = new maplibregl.Popup({ offset: 20, maxWidth: '260px' }).setHTML(`
+          <div style="font-family:system-ui;padding:4px 0;">
+            <div style="font-weight:700;font-size:14px;margin-bottom:4px;">${safe(s.staffName)}</div>
+            ${s.designation ? `<div style="color:#64748b;font-size:12px;margin-bottom:6px;">${safe(s.designation)}</div>` : ''}
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
+              <span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${mvColor};color:#fff;">
+                ${MOVEMENT_LABELS[s.movementState || 'unknown']}
+              </span>
+              ${(s.riskScore || 0) > 0 ? `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${(s.riskScore||0)>40?'#dc2626':'#f59e0b'};color:#fff;">Risk: ${s.riskScore}</span>` : ''}
+            </div>
+            <div style="font-size:12px;color:#475569;">
+              ${s.location ? `GPS: ${Number(s.location.lat).toFixed(5)}, ${Number(s.location.lng).toFixed(5)}` : ''}
+              ${s.location?.speed > 0 ? `<br/>Speed: ${(s.location.speed * 3.6).toFixed(0)} km/h` : ''}
+              ${s.location?.accuracy ? `<br/>Accuracy: ${Number(s.location.accuracy).toFixed(0)}m` : ''}
+            </div>
+            <div style="margin-top:6px;font-size:11px;color:#9ca3af;">Token: ${s.token}</div>
+          </div>
+        `);
+
+        const marker = new maplibregl.Marker({ element: el })
+          .setLngLat([s.location.lng, s.location.lat])
+          .setPopup(popup)
+          .addTo(map);
+
+        markersRef.current.push(marker);
+      }
+
+      // Fit bounds to show all staff
+      if (staffWithLocation.length > 1) {
+        const bounds = new maplibregl.LngLatBounds();
+        staffWithLocation.forEach(s => bounds.extend([s.location.lng, s.location.lat]));
+        map.fitBounds(bounds, { padding: 60, maxZoom: 15 });
+      } else if (staffWithLocation.length === 1) {
+        map.flyTo({ center: [staffWithLocation[0].location.lng, staffWithLocation[0].location.lat], zoom: 14 });
+      }
+    }
+
+    return () => {};
+  }, [staffWithLocation.map(s => `${s.token}:${s.location?.lat}:${s.location?.lng}:${s.movementState}:${s.riskScore}`).join('|')]);
+
+  // Cleanup map on unmount
+  useEffect(() => { return () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } }; }, []);
+
+  if (staffWithLocation.length === 0) {
+    return (
+      <div style={{ textAlign: 'center', padding: 60, color: '#9ca3af' }}>
+        <p>No staff with GPS data to display on map.</p>
+        <p style={{ fontSize: '.85rem' }}>Start a tracking session to see the heatmap.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginBottom: 20 }}>
+      {/* Add CSS animation for marker pulse */}
+      <style>{`@keyframes markerPulse { 0% { transform: scale(1); opacity: 0.8; } 50% { transform: scale(1.5); opacity: 0; } 100% { transform: scale(1); opacity: 0; } }`}</style>
+      <div ref={mapContainer} style={{ width: '100%', height: 420, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }} />
+      {/* Legend */}
+      <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 10, fontSize: '.78rem', color: '#64748b' }}>
+        {Object.entries(MOVEMENT_LABELS).filter(([k]) => k !== 'unknown').map(([key, label]) => (
+          <span key={key} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: MOVEMENT_COLORS[key] }} />
+            {label}
+          </span>
+        ))}
+        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#dc2626', border: '2px solid #dc2626' }} />
+          High Risk
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── Helper functions ──
 function safe(val) {
   if (val === null || val === undefined) return '';
   if (typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') return String(val);
   if (Array.isArray(val)) return val.map(safe).join(', ');
-  if (typeof val === 'object') {
-    try { return JSON.stringify(val); } catch { return '[object]'; }
-  }
+  if (typeof val === 'object') { try { return JSON.stringify(val); } catch { return '[object]'; } }
   return String(val);
 }
 
+function formatAlertType(type) {
+  const map = {
+    teleportation: 'Teleportation Jump',
+    impossible_speed: 'Impossible Speed',
+    mock_gps_suspect: 'Mock GPS Detected',
+    automation_detected: 'Automation/Bot Detected',
+    devtools_open: 'Developer Tools Open',
+    prolonged_idle: 'Prolonged Idle',
+  };
+  return map[type] || type.replace(/_/g, ' ');
+}
+
 // ══════════════════════════════════════════════════════
-//  STAFF CARD (admin-only — shows full OSINT + controls)
+//  STAFF CARD (admin-only — shows OSINT + controls + intelligence)
 // ══════════════════════════════════════════════════════
 function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, onShare, onUpdateDuration }) {
   const [showDuration, setShowDuration] = useState(false);
@@ -340,28 +513,17 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
   const net   = s.network || dev.network || {};
   const loc   = s.location;
 
-  // Safely extract screen as string no matter what format it is
   const screenStr = !dev.screen ? '' :
     typeof dev.screen === 'string' ? dev.screen :
     (dev.screen.width && dev.screen.height) ? `${dev.screen.width}x${dev.screen.height}` : '';
 
-  // Offline detection: no update for 60+ seconds = offline
   const lastUpdateMs = loc?.updatedAt ? Date.now() - new Date(loc.updatedAt).getTime() : Infinity;
   const isOffline = !past && s.status === 'active' && lastUpdateMs > 60000;
-  const offlineDuration = isOffline ? timeAgo(loc?.updatedAt) : '';
 
-  // Dead reckoning: estimate current position if offline + had speed/heading
-  let estimatedLoc = null;
-  if (isOffline && loc && loc.speed > 0 && loc.heading != null) {
-    const elapsedSec = lastUpdateMs / 1000;
-    const maxDriftSec = 600; // only predict up to 10 min
-    const driftSec = Math.min(elapsedSec, maxDriftSec);
-    const distMeters = loc.speed * driftSec;
-    const headingRad = (loc.heading * Math.PI) / 180;
-    const dLat = (distMeters * Math.cos(headingRad)) / 111320;
-    const dLng = (distMeters * Math.sin(headingRad)) / (111320 * Math.cos(loc.lat * Math.PI / 180));
-    estimatedLoc = { lat: loc.lat + dLat, lng: loc.lng + dLng };
-  }
+  // Movement & Intelligence
+  const mvState = s.movementState || 'unknown';
+  const riskScore = s.riskScore || 0;
+  const intelFlags = s.intelFlags || {};
 
   const ipCity = ipGeo.status !== 'fail'
     ? [ipGeo.city, ipGeo.regionName, ipGeo.countryCode || ipGeo.country].filter(Boolean).join(', ')
@@ -372,41 +534,62 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
     onUpdateDuration(s.token, hours);
     setShowDuration(false);
   };
-
   const handleCustomDuration = () => {
     const h = parseFloat(customHours);
-    if (h > 0 && h <= 720) { // max 30 days
-      onUpdateDuration(s.token, h);
-      setShowDuration(false);
-      setCustomHours('');
-    }
+    if (h > 0 && h <= 720) { onUpdateDuration(s.token, h); setShowDuration(false); setCustomHours(''); }
   };
 
   return (
     <div className={`staff-card ${past ? 'past' : ''}`}>
-      {/* Header row */}
+      {/* Header */}
       <div className="sc-header">
         <div className="sc-status">
           {!past && !isOffline && <span className="pulse-dot" style={{ width: 8, height: 8 }} />}
           <span className={`sc-badge ${past ? 'off' : isOffline ? 'offline' : 'on'}`}>
             {past ? (s.status === 'expired' ? 'EXPIRED' : 'STOPPED') : isOffline ? 'OFFLINE' : 'LIVE'}
           </span>
-          {!past && s.expiresAt && (
-            <span className="sc-expires">Expires: {timeUntil(s.expiresAt)}</span>
-          )}
+          {!past && s.expiresAt && <span className="sc-expires">Expires: {timeUntil(s.expiresAt)}</span>}
         </div>
       </div>
 
-      {/* Offline alert banner */}
-      {isOffline && (
-        <div className="sc-offline-banner">
-          <span className="pulse-warn" />
-          Staff device offline
-          <span className="sc-lastseen">Last seen: {offlineDuration}</span>
+      {/* Intelligence Badges */}
+      {!past && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', margin: '6px 0' }}>
+          <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '.72rem', fontWeight: 600, background: MOVEMENT_COLORS[mvState], color: '#fff' }}>
+            {MOVEMENT_LABELS[mvState]}
+          </span>
+          {loc?.speed > 0 && (
+            <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '.72rem', fontWeight: 600, background: '#e0f2fe', color: '#0369a1' }}>
+              {(Number(loc.speed) * 3.6).toFixed(0)} km/h
+            </span>
+          )}
+          {riskScore > 0 && (
+            <span style={{
+              display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '.72rem', fontWeight: 600,
+              background: riskScore > 40 ? '#fef2f2' : '#fffbeb',
+              color: riskScore > 40 ? '#dc2626' : '#b45309',
+              border: `1px solid ${riskScore > 40 ? '#fca5a5' : '#fcd34d'}`,
+            }}>
+              Risk: {riskScore}
+            </span>
+          )}
+          {intelFlags.mockGps && (
+            <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '.72rem', fontWeight: 700, background: '#dc2626', color: '#fff' }}>
+              MOCK GPS
+            </span>
+          )}
+          {intelFlags.automation && (
+            <span style={{ display: 'inline-block', padding: '2px 8px', borderRadius: 10, fontSize: '.72rem', fontWeight: 700, background: '#7c3aed', color: '#fff' }}>
+              BOT
+            </span>
+          )}
         </div>
       )}
 
-      {/* Staff Info */}
+      {isOffline && (
+        <div className="sc-offline-banner"><span className="pulse-warn" /> Staff device offline <span className="sc-lastseen">Last seen: {timeAgo(loc?.updatedAt)}</span></div>
+      )}
+
       <h3 className="sc-name">{s.staffName}</h3>
       {s.designation && <p className="sc-desig">{s.designation}</p>}
 
@@ -415,157 +598,91 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
         <span>&#128231; {s.staffEmail}</span>
       </div>
 
-      {/* OSINT Data — all values passed through safe() to prevent React crash */}
+      {/* OSINT Data */}
       <div className="sc-osint">
         {loc && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128205;</span>
+          <div className="osint-row"><span className="osint-icon">&#128205;</span>
             <span>GPS: {Number(loc.lat).toFixed(5)}, {Number(loc.lng).toFixed(5)}
               {loc.accuracy && <small> (&plusmn;{Number(loc.accuracy).toFixed(0)}m)</small>}
             </span>
           </div>
         )}
-        {estimatedLoc && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128268;</span>
-            <span className="sc-estimated">Est: {Number(estimatedLoc.lat).toFixed(5)}, {Number(estimatedLoc.lng).toFixed(5)} (predicted)</span>
-          </div>
-        )}
         {loc?.updatedAt && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128336;</span>
+          <div className="osint-row"><span className="osint-icon">&#128336;</span>
             <span>Updated {safe(timeAgo(loc.updatedAt))}{isOffline ? ' (OFFLINE)' : ''}</span>
           </div>
         )}
-        {loc?.speed > 0 && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128663;</span>
-            <span>{(Number(loc.speed) * 3.6).toFixed(0)} km/h</span>
-          </div>
-        )}
         {ipCity && (
-          <div className="osint-row">
-            <span className="osint-icon">&#127760;</span>
-            <span>IP: {safe(ipCity)}</span>
-          </div>
+          <div className="osint-row"><span className="osint-icon">&#127760;</span><span>IP: {safe(ipCity)}</span></div>
         )}
         {ipGeo.isp && ipGeo.isp !== 'Local' && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128274;</span>
-            <span>ISP: {safe(ipGeo.isp)}
-              {ipGeo.mobile && ' (Mobile)'}
-              {ipGeo.proxy && <span className="sc-warn"> Warning: Proxy</span>}
-            </span>
+          <div className="osint-row"><span className="osint-icon">&#128274;</span>
+            <span>ISP: {safe(ipGeo.isp)}{ipGeo.mobile && ' (Mobile)'}{ipGeo.proxy && <span className="sc-warn"> Proxy!</span>}</span>
           </div>
         )}
         {(ua.device || ua.os) && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128241;</span>
+          <div className="osint-row"><span className="osint-icon">&#128241;</span>
             <span>{[ua.device, ua.os, ua.browser].filter(Boolean).map(safe).join(' / ')}</span>
           </div>
         )}
         {bat.level != null && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128267;</span>
+          <div className="osint-row"><span className="osint-icon">&#128267;</span>
             <span>{safe(bat.level)}% {bat.charging ? 'Charging' : ''}</span>
           </div>
         )}
         {net.type && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128225;</span>
+          <div className="osint-row"><span className="osint-icon">&#128225;</span>
             <span>{safe(net.type).toUpperCase()}{net.downlink ? ` | ${safe(net.downlink)} Mbps` : ''}</span>
           </div>
         )}
         {screenStr && (
-          <div className="osint-row">
-            <span className="osint-icon">&#128421;</span>
+          <div className="osint-row"><span className="osint-icon">&#128421;</span>
             <span>Screen: {screenStr}{dev.pixelRatio > 1 ? ` @${dev.pixelRatio}x` : ''}</span>
           </div>
         )}
         {dev.timezone && (
-          <div className="osint-row">
-            <span className="osint-icon">&#127757;</span>
-            <span>{safe(dev.timezone)}</span>
-          </div>
+          <div className="osint-row"><span className="osint-icon">&#127757;</span><span>{safe(dev.timezone)}</span></div>
         )}
       </div>
 
-      {/* ── Admin Controls (only for active sessions) ── */}
+      {/* Admin Controls */}
       {!past && (
         <div className="admin-controls">
-          {/* Share Link Panel */}
           <button className="ctrl-btn ctrl-share" onClick={() => setShowSharePanel(!showSharePanel)}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/>
-              <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
-            </svg>
-            Share Tracking Link
+              <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+            </svg> Share Tracking Link
           </button>
-
           {showSharePanel && (
             <div className="share-panel">
+              <div className="share-panel-row"><input type="tel" placeholder="Patient/family phone (+91...)" value={sharePhone} onChange={e => setSharePhone(e.target.value)} className="share-phone-input" /></div>
               <div className="share-panel-row">
-                <input
-                  type="tel" placeholder="Patient/family phone (+91...)"
-                  value={sharePhone} onChange={e => setSharePhone(e.target.value)}
-                  className="share-phone-input"
-                />
-              </div>
-              <div className="share-panel-row">
-                <button className="ctrl-btn ctrl-whatsapp" onClick={() => onWhatsApp(s.token, s.staffName, sharePhone)}>
-                  WhatsApp
-                </button>
-                <button className="ctrl-btn ctrl-copy" onClick={() => onCopy(s.token)}>
-                  Copy Link
-                </button>
-                <button className="ctrl-btn ctrl-generic" onClick={() => onShare(s.token, s.staffName)}>
-                  Share
-                </button>
+                <button className="ctrl-btn ctrl-whatsapp" onClick={() => onWhatsApp(s.token, s.staffName, sharePhone)}>WhatsApp</button>
+                <button className="ctrl-btn ctrl-copy" onClick={() => onCopy(s.token)}>Copy Link</button>
+                <button className="ctrl-btn ctrl-generic" onClick={() => onShare(s.token, s.staffName)}>Share</button>
               </div>
             </div>
           )}
-
-          {/* Duration Control */}
           <button className="ctrl-btn ctrl-duration" onClick={() => setShowDuration(!showDuration)}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-            </svg>
-            Set Duration
+            </svg> Set Duration
           </button>
-
           {showDuration && showDuration !== 'custom' && (
-            <div className="duration-panel">
-              <div className="duration-grid">
-                {DURATION_OPTIONS.map(opt => (
-                  <button key={opt.value} className="dur-btn" onClick={() => handleDurationSelect(opt.value)}>
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
+            <div className="duration-panel"><div className="duration-grid">
+              {DURATION_OPTIONS.map(opt => (<button key={opt.value} className="dur-btn" onClick={() => handleDurationSelect(opt.value)}>{opt.label}</button>))}
+            </div></div>
           )}
-
           {showDuration === 'custom' && (
-            <div className="duration-panel">
-              <div className="custom-duration">
-                <input
-                  type="number" placeholder="Hours (e.g. 36)" min="0.5" max="720" step="0.5"
-                  value={customHours} onChange={e => setCustomHours(e.target.value)}
-                  className="share-phone-input"
-                />
-                <button className="ctrl-btn ctrl-copy" onClick={handleCustomDuration}>Set</button>
-                <button className="ctrl-btn" onClick={() => setShowDuration(false)} style={{ background: 'var(--gray-100)' }}>Cancel</button>
-              </div>
-            </div>
+            <div className="duration-panel"><div className="custom-duration">
+              <input type="number" placeholder="Hours (e.g. 36)" min="0.5" max="720" step="0.5" value={customHours} onChange={e => setCustomHours(e.target.value)} className="share-phone-input" />
+              <button className="ctrl-btn ctrl-copy" onClick={handleCustomDuration}>Set</button>
+              <button className="ctrl-btn" onClick={() => setShowDuration(false)} style={{ background: 'var(--gray-100)' }}>Cancel</button>
+            </div></div>
           )}
-
-          {/* Stop Button */}
           <button className="ctrl-btn ctrl-stop" onClick={() => onStop(s.token)}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="6" y="6" width="12" height="12" rx="1"/>
-            </svg>
-            Stop Tracking
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="6" y="6" width="12" height="12" rx="1"/></svg> Stop Tracking
           </button>
         </div>
       )}

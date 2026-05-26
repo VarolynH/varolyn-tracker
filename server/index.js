@@ -574,25 +574,142 @@ async function build() {
       } catch {}
     }
 
-    // Update session with latest location
+    // Update session with latest location + ANOMALY DETECTION
     if (lastFiltered) {
       const { f, loc } = lastFiltered;
+
+      // ═══════════════════════════════════════════════════
+      //  MAVEN INTELLIGENCE ENGINE — Anomaly Detection
+      //  Detects: mock GPS, teleportation, impossible speed,
+      //  idle state, spoofing, route deviation, risk scoring
+      // ═══════════════════════════════════════════════════
+      const alerts = [];
+      let movementState = 'unknown';
+      let riskScore = 0;
+      const intelFlags = {};
+
+      // Get previous location for comparison
+      try {
+        const prev = await db.query(
+          `SELECT last_lat, last_lng, last_speed, last_update, movement_state, idle_since, risk_score
+           FROM tracking_sessions WHERE token=$1`, [token]);
+        if (prev.rows.length > 0 && prev.rows[0].last_lat) {
+          const p = prev.rows[0];
+          const timeDiffMs = Date.now() - new Date(p.last_update).getTime();
+          const timeDiffSec = timeDiffMs / 1000;
+
+          // Haversine distance calculation
+          const R = 6371000; // Earth radius in meters
+          const dLat = (f.lat - p.last_lat) * Math.PI / 180;
+          const dLon = (f.lng - p.last_lng) * Math.PI / 180;
+          const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                    Math.cos(p.last_lat * Math.PI / 180) * Math.cos(f.lat * Math.PI / 180) *
+                    Math.sin(dLon/2) * Math.sin(dLon/2);
+          const distMeters = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+          const speedMps = timeDiffSec > 0 ? distMeters / timeDiffSec : 0;
+          const speedKmh = speedMps * 3.6;
+
+          // ── TELEPORTATION DETECTION: >500m in <5 seconds ──
+          if (distMeters > 500 && timeDiffSec < 5) {
+            alerts.push({ type: 'teleportation', severity: 'critical', details: { distMeters: Math.round(distMeters), timeSec: Math.round(timeDiffSec), speedKmh: Math.round(speedKmh) } });
+            riskScore += 40;
+            intelFlags.teleportation = true;
+          }
+
+          // ── IMPOSSIBLE SPEED: >200 km/h (staff walking/driving, not flying) ──
+          if (speedKmh > 200 && timeDiffSec > 2) {
+            alerts.push({ type: 'impossible_speed', severity: 'high', details: { speedKmh: Math.round(speedKmh), distMeters: Math.round(distMeters) } });
+            riskScore += 30;
+            intelFlags.impossibleSpeed = true;
+          }
+
+          // ── MOVEMENT STATE CLASSIFICATION ──
+          if (speedKmh < 0.5) { movementState = 'idle'; }
+          else if (speedKmh < 6) { movementState = 'walking'; }
+          else if (speedKmh < 20) { movementState = 'slow_vehicle'; }
+          else if (speedKmh < 120) { movementState = 'vehicle'; }
+          else { movementState = 'suspicious_speed'; riskScore += 10; }
+
+          // ── IDLE DETECTION: staff not moving for >15 min ──
+          if (movementState === 'idle') {
+            const idleSince = p.movement_state === 'idle' && p.idle_since
+              ? new Date(p.idle_since)
+              : new Date();
+            const idleMin = (Date.now() - idleSince.getTime()) / 60000;
+            if (idleMin > 15 && p.movement_state === 'idle') {
+              alerts.push({ type: 'prolonged_idle', severity: 'medium', details: { idleMinutes: Math.round(idleMin) } });
+            }
+            if (idleMin > 60) { riskScore += 5; }
+          }
+
+          // Carry over existing risk score (decaying)
+          riskScore += Math.max(0, (p.risk_score || 0) - 2); // Decay by 2 each update
+        }
+      } catch (e) { console.warn('[INTEL] Analysis error:', e.message); }
+
+      // ── MOCK GPS DETECTION (from client intel flags) ──
+      const intel = loc.intel || {};
+      if (intel.mockSuspect) {
+        alerts.push({ type: 'mock_gps_suspect', severity: 'critical', details: { flags: intel } });
+        riskScore += 50;
+        intelFlags.mockGps = true;
+      }
+      if (intel.webdriver) {
+        alerts.push({ type: 'automation_detected', severity: 'critical', details: { webdriver: true } });
+        riskScore += 60;
+        intelFlags.automation = true;
+      }
+      if (intel.devTools) {
+        alerts.push({ type: 'devtools_open', severity: 'medium', details: {} });
+        riskScore += 15;
+        intelFlags.devTools = true;
+      }
+      if (intel.accuracyExact) {
+        // Perfectly round accuracy = likely mock GPS app
+        riskScore += 20;
+        intelFlags.accuracySuspicious = true;
+      }
+
+      // Cap risk score at 100
+      riskScore = Math.min(100, Math.max(0, riskScore));
+
+      // Store alerts in DB
+      for (const alert of alerts) {
+        try {
+          await db.query(
+            `INSERT INTO intelligence_alerts (session_id, token, alert_type, severity, details, lat, lng)
+             VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7)`,
+            [sessionId, token, alert.type, alert.severity, JSON.stringify(alert.details), f.lat, f.lng]);
+        } catch {}
+      }
+
+      // Update session with location + intelligence data
       await db.query(
         `UPDATE tracking_sessions
          SET last_lat=$1, last_lng=$2, last_accuracy=$3, last_speed=$4, last_heading=$5,
              last_update=NOW(),
              last_battery=COALESCE($6::jsonb, last_battery),
-             last_network=COALESCE($7::jsonb, last_network)
-         WHERE token=$8`,
+             last_network=COALESCE($7::jsonb, last_network),
+             movement_state=$8,
+             idle_since=CASE WHEN $8='idle' AND movement_state!='idle' THEN NOW()
+                            WHEN $8='idle' THEN idle_since
+                            ELSE NULL END,
+             risk_score=$9,
+             intel_flags=COALESCE($10::jsonb, intel_flags)
+         WHERE token=$11`,
         [f.lat, f.lng, loc.accuracy, loc.speed, loc.heading,
          loc.battery ? JSON.stringify(loc.battery) : null,
-         loc.network ? JSON.stringify(loc.network) : null, token]);
+         loc.network ? JSON.stringify(loc.network) : null,
+         movementState, riskScore,
+         Object.keys(intelFlags).length > 0 ? JSON.stringify(intelFlags) : null,
+         token]);
 
-      // Publish latest to SSE customers
+      // Publish latest to SSE customers (includes intelligence data)
       await redisPub.publish(`tracking:${token}`, JSON.stringify({
         type: 'location_update', lat: f.lat, lng: f.lng,
         accuracy: loc.accuracy, speed: loc.speed, heading: loc.heading,
         battery: loc.battery, network: loc.network, timestamp: Date.now(),
+        movementState, riskScore,
       }));
     }
 
@@ -649,10 +766,22 @@ async function build() {
               status, started_at, expires_at, stopped_at,
               last_lat, last_lng, last_accuracy, last_speed, last_heading,
               last_update, last_battery, last_network,
-              ip_geo, device_info, created_at
+              ip_geo, device_info, created_at,
+              movement_state, idle_since, risk_score, intel_flags
        FROM tracking_sessions
        ORDER BY CASE WHEN status='active' THEN 0 ELSE 1 END, created_at DESC
        LIMIT 50`);
+
+    // Fetch recent unresolved alerts
+    let alerts = [];
+    try {
+      const alertRes = await db.query(
+        `SELECT id, token, alert_type, severity, details, lat, lng, created_at
+         FROM intelligence_alerts
+         WHERE resolved = false
+         ORDER BY created_at DESC LIMIT 50`);
+      alerts = alertRes.rows;
+    } catch {}
 
     await auditLog('dashboard_viewed', req.adminEmail, null, req.ip);
 
@@ -677,7 +806,13 @@ async function build() {
         network:    s.last_network || {},
         ipGeo:      s.ip_geo || {},
         deviceInfo: sanitizeDeviceInfo(s.device_info || {}),
+        // Intelligence data
+        movementState: s.movement_state || 'unknown',
+        idleSince:     s.idle_since,
+        riskScore:     s.risk_score || 0,
+        intelFlags:    s.intel_flags || {},
       })),
+      alerts,
     };
   });
 
@@ -976,11 +1111,25 @@ async function start() {
         details JSONB DEFAULT '{}',
         created_at TIMESTAMPTZ DEFAULT NOW()
       );
+      CREATE TABLE IF NOT EXISTS intelligence_alerts (
+        id BIGSERIAL PRIMARY KEY,
+        session_id UUID REFERENCES tracking_sessions(id) ON DELETE CASCADE,
+        token VARCHAR(24) NOT NULL,
+        alert_type VARCHAR(50) NOT NULL,
+        severity VARCHAR(20) DEFAULT 'medium',
+        details JSONB DEFAULT '{}',
+        lat DOUBLE PRECISION,
+        lng DOUBLE PRECISION,
+        resolved BOOLEAN DEFAULT false,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      );
       CREATE INDEX IF NOT EXISTS idx_lp_session ON location_points(session_id, recorded_at DESC);
       CREATE INDEX IF NOT EXISTS idx_ts_token ON tracking_sessions(token);
       CREATE INDEX IF NOT EXISTS idx_ts_active ON tracking_sessions(status) WHERE status = 'active';
       CREATE INDEX IF NOT EXISTS idx_ts_secret ON tracking_sessions(session_secret);
       CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_alerts_session ON intelligence_alerts(session_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_alerts_unresolved ON intelligence_alerts(resolved, created_at DESC) WHERE resolved = false;
     `);
     console.log('[DB] Tables created successfully');
 
@@ -993,6 +1142,14 @@ async function start() {
       `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_speed REAL`,
       `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_heading REAL`,
       `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS push_subscription JSONB`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS movement_state VARCHAR(20) DEFAULT 'unknown'`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS idle_since TIMESTAMPTZ`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS risk_score INTEGER DEFAULT 0`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS intel_flags JSONB DEFAULT '{}'`,
+      `ALTER TABLE location_points ADD COLUMN IF NOT EXISTS altitude DOUBLE PRECISION`,
+      `ALTER TABLE location_points ADD COLUMN IF NOT EXISTS intel JSONB`,
+      // intelligence_alerts table migration (in case it doesn't exist)
+      `CREATE TABLE IF NOT EXISTS intelligence_alerts (id BIGSERIAL PRIMARY KEY, session_id UUID, token VARCHAR(24) NOT NULL, alert_type VARCHAR(50) NOT NULL, severity VARCHAR(20) DEFAULT 'medium', details JSONB DEFAULT '{}', lat DOUBLE PRECISION, lng DOUBLE PRECISION, resolved BOOLEAN DEFAULT false, created_at TIMESTAMPTZ DEFAULT NOW())`,
     ];
     for (const mig of migrations) {
       try { await db.query(mig); } catch (e) { /* column already exists or other non-fatal */ }

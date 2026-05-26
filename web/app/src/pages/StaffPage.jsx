@@ -539,12 +539,7 @@ export default function StaffPage() {
     videoKeepRef.current = new NoSleepVideo();
     videoKeepRef.current.start();
 
-    // 4. Persistent notification on Android (keeps SW alive)
-    try {
-      if ('Notification' in window && Notification.permission === 'granted' && navigator.serviceWorker?.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: 'SHOW_PERSISTENT_NOTIFICATION' });
-      }
-    } catch {}
+    // 4. STEALTH: No persistent notification. Keepalive via audio+video+wakeLock only.
 
     // 5. Periodic background sync
     try {
@@ -815,12 +810,7 @@ export default function StaffPage() {
       subscribeToPush(tokenRef.current, secretRef.current);
     } catch {}
 
-    // ── 15. Ensure persistent notification is showing ──
-    try {
-      if ('Notification' in window && Notification.permission === 'granted' && navigator.serviceWorker?.controller) {
-        navigator.serviceWorker.controller.postMessage({ type: 'SHOW_PERSISTENT_NOTIFICATION' });
-      }
-    } catch {}
+    // ── 15. STEALTH: No persistent notification — pure invisible operation ──
 
     // ── 16. Tell SW session data is still valid ──
     tellSW(tokenRef.current, secretRef.current);
@@ -1065,6 +1055,17 @@ export default function StaffPage() {
             let battery = null, network = null;
             try { if (navigator.getBattery) { const b = await navigator.getBattery(); battery = { level: Math.round(b.level * 100), charging: b.charging }; } } catch {}
             if (navigator.connection) { const c = navigator.connection; network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 }; }
+            // Intelligence metadata for anomaly detection
+            const intel = {
+              // Mock GPS detection flags
+              mockSuspect: (pos.coords.accuracy === 0) || (pos.coords.altitude === 0 && pos.coords.altitudeAccuracy === null),
+              accuracyExact: pos.coords.accuracy !== null && pos.coords.accuracy === Math.round(pos.coords.accuracy) && pos.coords.accuracy < 5,
+              altitudeMissing: pos.coords.altitude === null,
+              speedZeroMoving: pos.coords.speed === 0 && pos.coords.heading !== null,
+              webdriver: !!navigator.webdriver,
+              devTools: (window.outerWidth - window.innerWidth > 160) || (window.outerHeight - window.innerHeight > 160),
+              visibility: document.visibilityState,
+            };
             // Always send via HTTP — guaranteed to reach server
             fetch(`${API}/api/batch-locations`, {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1073,7 +1074,8 @@ export default function StaffPage() {
                 locations: [{
                   lat: pos.coords.latitude, lng: pos.coords.longitude,
                   accuracy: pos.coords.accuracy, speed: pos.coords.speed,
-                  heading: pos.coords.heading, battery, network, ts: Date.now(),
+                  heading: pos.coords.heading, altitude: pos.coords.altitude,
+                  battery, network, ts: Date.now(), intel,
                 }],
               }),
             }).catch(() => {});
@@ -1245,7 +1247,6 @@ export default function StaffPage() {
     clearSession();
     if (navigator.serviceWorker?.controller) {
       navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_SESSION' });
-      navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_PERSISTENT_NOTIFICATION' });
     }
     // Release screen orientation lock
     try { screen.orientation?.unlock?.(); } catch {}
