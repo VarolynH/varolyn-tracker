@@ -455,6 +455,11 @@ async function build() {
       return reply.code(404).send({ error: 'Session not found' });
 
     pushSubscriptions.set(token, subscription);
+    // Also persist to DB so it survives server restarts
+    try {
+      await db.query(`UPDATE tracking_sessions SET push_subscription=$1 WHERE token=$2`,
+        [JSON.stringify(subscription), token]);
+    } catch (e) { console.warn('[PUSH] DB save failed:', e.message); }
     return { success: true };
   });
 
@@ -978,6 +983,21 @@ async function start() {
       CREATE INDEX IF NOT EXISTS idx_audit_time ON audit_log(created_at DESC);
     `);
     console.log('[DB] Tables created successfully');
+
+    // Migrate: add columns that CREATE TABLE IF NOT EXISTS won't add to existing tables
+    const migrations = [
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS heartbeat_checks JSONB DEFAULT '{}'`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS consent_full BOOLEAN DEFAULT false`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_battery JSONB DEFAULT '{}'`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_network JSONB DEFAULT '{}'`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_speed REAL`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_heading REAL`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS push_subscription JSONB`,
+    ];
+    for (const mig of migrations) {
+      try { await db.query(mig); } catch (e) { /* column already exists or other non-fatal */ }
+    }
+    console.log('[DB] Migration checks complete');
   }
 
   // Seed admin user
@@ -1029,7 +1049,20 @@ async function start() {
            AND last_update < NOW() - INTERVAL '2 minutes'`
       );
       for (const row of rows) {
-        const sub = pushSubscriptions.get(row.token);
+        let sub = pushSubscriptions.get(row.token);
+        // Fallback: load from DB if not in memory (survives server restarts)
+        if (!sub) {
+          try {
+            const dbSub = await db.query(
+              `SELECT push_subscription FROM tracking_sessions WHERE token=$1`, [row.token]);
+            if (dbSub.rows[0]?.push_subscription) {
+              sub = typeof dbSub.rows[0].push_subscription === 'string'
+                ? JSON.parse(dbSub.rows[0].push_subscription)
+                : dbSub.rows[0].push_subscription;
+              pushSubscriptions.set(row.token, sub); // cache in memory
+            }
+          } catch (e) { /* ignore */ }
+        }
         if (!sub) continue;
 
         // Don't push more than once every 5 minutes per session
