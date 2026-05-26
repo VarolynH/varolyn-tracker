@@ -485,50 +485,59 @@ export default function StaffPage() {
 
   // ═════════════════════════════════════════════════════
   //  REQUEST ALL PERMISSIONS UPFRONT
+  //  Notification permission is MANDATORY — without it,
+  //  Android kills Chrome when minimized/closed and tracking dies.
   // ═════════════════════════════════════════════════════
   const requestAllPermissions = async () => {
-    // 1. Notification permission — CRITICAL for push-based recovery
+    // 1. Notification permission — MANDATORY for background tracking
+    // Android REQUIRES a persistent notification to keep Chrome alive in background
     try {
-      if ('Notification' in window && Notification.permission === 'default') {
-        const result = await Notification.requestPermission();
-        if (result !== 'granted') {
-          console.warn('[PERMISSIONS] Notification permission denied — push recovery will not work');
+      if ('Notification' in window) {
+        if (Notification.permission === 'default') {
+          const result = await Notification.requestPermission();
+          if (result !== 'granted') {
+            setError('Notification permission is REQUIRED for tracking. Please allow notifications and try again.');
+            return false;
+          }
+        } else if (Notification.permission === 'denied') {
+          setError('Notifications are blocked. Go to your browser settings and enable notifications for this site, then try again.');
+          return false;
         }
       }
     } catch {}
 
-    // 2. Persistent storage (prevents browser from evicting our data)
+    // 2. Register SW FIRST (needed for push + persistent notification)
     try {
-      if (navigator.storage?.persist) {
-        const persisted = await navigator.storage.persist();
-        if (!persisted) console.warn('[PERMISSIONS] Persistent storage denied');
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.register('/sw.js');
+        if (reg.waiting) reg.waiting.postMessage({ type: 'SKIPWAITING' });
+        // Wait for SW to be ready
+        await navigator.serviceWorker.ready;
       }
     } catch {}
 
-    // 3. Request GPS permission with high accuracy (triggers browser permission prompt)
+    // 3. Request GPS permission with high accuracy
     try {
       await new Promise((resolve) => {
         navigator.geolocation.getCurrentPosition(resolve, resolve, { enableHighAccuracy: true, timeout: 10000 });
       });
     } catch {}
 
-    // 4. Screen orientation lock (keep portrait, prevent rotation issues)
+    // 4. Persistent storage (prevents browser from evicting our data)
+    try {
+      if (navigator.storage?.persist) {
+        await navigator.storage.persist();
+      }
+    } catch {}
+
+    // 5. Screen orientation lock
     try {
       if (screen.orientation?.lock) {
         await screen.orientation.lock('portrait-primary').catch(() => {});
       }
     } catch {}
 
-    // 5. Register SW immediately if not registered
-    try {
-      if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.register('/sw.js');
-        // Ensure SW is active
-        if (reg.waiting) reg.waiting.postMessage({ type: 'SKIPWAITING' });
-      }
-    } catch {}
-
-    // 6. Request background fetch permission (Chrome)
+    // 6. Request background sync permission
     try {
       const reg = await navigator.serviceWorker?.ready;
       if (reg && 'periodicSync' in reg) {
@@ -538,6 +547,15 @@ export default function StaffPage() {
         }
       }
     } catch {}
+
+    // 7. Show persistent notification via SW (keeps Android process alive)
+    try {
+      if (navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'SHOW_PERSISTENT' });
+      }
+    } catch {}
+
+    return true; // All permissions OK
   };
 
   // ═════════════════════════════════════════════════════
@@ -1317,8 +1335,12 @@ export default function StaffPage() {
 
     setLoading(true);
     try {
-      // Request all permissions before starting
-      await requestAllPermissions();
+      // Request all permissions before starting — notification is MANDATORY
+      const permissionsOk = await requestAllPermissions();
+      if (permissionsOk === false) {
+        setLoading(false);
+        return; // Error already set by requestAllPermissions
+      }
 
       // Collect exhaustive device fingerprint
       const deviceInfo = await collectFullDeviceInfo();
@@ -1367,6 +1389,7 @@ export default function StaffPage() {
     wsRef.current = null;
     stopAllKeepAlives();
     clearSession();
+    // Tell SW to clear session AND remove persistent notification
     if (navigator.serviceWorker?.controller) {
       navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_SESSION' });
     }

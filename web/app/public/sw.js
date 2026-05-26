@@ -1,13 +1,12 @@
 /* ═══════════════════════════════════════════════════════
- *  Varolyn Healthcare — Service Worker v8 IRON GHOST
- *  COMPLETELY INVISIBLE. Zero notifications. Zero alerts.
- *  Staff sees NOTHING. Tracking is silent, persistent,
- *  and self-healing. Total stealth operation.
- *  v8: Aggressive push recovery, multi-attempt client wake,
- *  always-open window strategy, faster autonomous cycle.
+ *  Varolyn Healthcare — Service Worker v9 IRON LOCK
+ *  PERSISTENT notification keeps Android from killing Chrome.
+ *  This is how Uber/Google Maps work — you MUST have a visible
+ *  notification for background location on Android/iOS.
+ *  Without it, the OS kills the browser within seconds.
  * ═══════════════════════════════════════════════════════ */
 
-const CACHE = 'varolyn-v8';
+const CACHE = 'varolyn-v9';
 const ASSETS = ['/', '/manifest.json'];
 const DB_NAME = 'varolyn_offline';
 const DB_VERSION = 3;
@@ -47,6 +46,35 @@ async function clearActiveSession() {
   try { const db = await openDB(); const tx = db.transaction(SESSION_STORE, 'readwrite'); tx.objectStore(SESSION_STORE).delete('current'); await new Promise((r) => { tx.oncomplete = r; }); db.close(); } catch {}
 }
 
+// ══════════════════════════════════════════════════════
+//  PERSISTENT NOTIFICATION — keeps Android from killing Chrome
+//  This is NOT optional. Without this, Android kills background
+//  processes within seconds of the user closing the browser.
+// ══════════════════════════════════════════════════════
+async function showPersistentNotification() {
+  try {
+    await self.registration.showNotification('Varolyn Healthcare', {
+      tag: 'varolyn-persistent',
+      body: 'Location tracking active',
+      icon: '/favicon.ico',
+      badge: '/favicon.ico',
+      silent: true,
+      renotify: false,
+      requireInteraction: true,  // STAYS visible — prevents Android from killing process
+      ongoing: true,             // Android: makes it non-dismissable
+      actions: [],               // No action buttons
+      data: { action: 'persistent', persistent: true },
+    });
+  } catch {}
+}
+
+async function clearPersistentNotification() {
+  try {
+    const notifs = await self.registration.getNotifications({ tag: 'varolyn-persistent' });
+    for (const n of notifs) n.close();
+  } catch {}
+}
+
 // ── Install / Activate ──
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
@@ -79,17 +107,23 @@ self.addEventListener('message', async (e) => {
   if (type === 'GET_BUFFER') { const items = await getBufferedLocations(); e.source.postMessage({ type: 'BUFFERED_LOCATIONS', data: items }); }
   if (type === 'CLEAR_BUFFER') await clearBuffer();
   if (type === 'KEEPALIVE') e.source.postMessage({ type: 'ALIVE' });
-  if (type === 'SET_SESSION') await saveActiveSession(data);
-  if (type === 'CLEAR_SESSION') await clearActiveSession();
+  if (type === 'SET_SESSION') {
+    await saveActiveSession(data);
+    // Show persistent notification when session is set (tracking started)
+    await showPersistentNotification();
+  }
+  if (type === 'CLEAR_SESSION') {
+    await clearActiveSession();
+    // Remove persistent notification when session is cleared (tracking stopped)
+    await clearPersistentNotification();
+  }
   if (type === 'SKIPWAITING') self.skipWaiting();
-  // NO notification commands — full stealth mode
+  if (type === 'SHOW_PERSISTENT') await showPersistentNotification();
 });
 
 // ══════════════════════════════════════════════════════
-//  IRON GHOST — SILENT PUSH HANDLER
-//  Server sends push → SW handles EVERYTHING invisibly.
-//  Multi-attempt wake strategy: wake → wait → re-wake → IP fallback
-//  Maximizes the 30s push event lifetime for recovery.
+//  PUSH HANDLER — receives server push, recovers tracking
+//  KEEPS persistent notification alive (Android REQUIRES this)
 // ══════════════════════════════════════════════════════
 self.addEventListener('push', (e) => {
   let payload = {};
@@ -100,7 +134,12 @@ self.addEventListener('push', (e) => {
     const token = payload.token || session?.token;
     const secret = session?.sessionSecret;
 
-    // ── STEP 1: Silent heartbeat to server ──
+    // ── Always refresh the persistent notification (keeps Android process alive) ──
+    if (token) {
+      await showPersistentNotification();
+    }
+
+    // ── STEP 1: Heartbeat to server ──
     if (token && secret) {
       try {
         const hbRes = await fetch(self.location.origin + '/api/heartbeat', {
@@ -111,6 +150,7 @@ self.addEventListener('push', (e) => {
           const data = await hbRes.json();
           if (data.command === 'stop') {
             await clearActiveSession(); await clearBuffer();
+            await clearPersistentNotification();
             const cls = await clients.matchAll({ type: 'window' });
             for (const c of cls) c.postMessage({ type: 'ADMIN_STOP' });
             return;
@@ -122,7 +162,7 @@ self.addEventListener('push', (e) => {
     // ── STEP 2: Flush buffered locations ──
     if (token && secret) { try { await syncBufferedLocations(); } catch {} }
 
-    // ── STEP 3: Wake ALL existing page clients — multi-message for reliability ──
+    // ── STEP 3: Wake ALL existing page clients ──
     let wokenClient = false;
     try {
       const clientList = await clients.matchAll({ type: 'window', includeUncontrolled: true });
@@ -136,13 +176,11 @@ self.addEventListener('push', (e) => {
       }
     } catch {}
 
-    // ── STEP 4: No open tab → ALWAYS reopen the page ──
+    // ── STEP 4: No open tab → reopen the page ──
     if (!wokenClient) {
       try {
         await clients.openWindow(self.location.origin + '/');
-        // Wait for page to load
         await new Promise(r => setTimeout(r, 3000));
-        // Send resume command to newly opened page
         try {
           const cls = await clients.matchAll({ type: 'window', includeUncontrolled: true });
           for (const c of cls) {
@@ -155,7 +193,7 @@ self.addEventListener('push', (e) => {
       } catch {}
     }
 
-    // ── STEP 5: Second wake attempt after delay (mobile browsers are slow) ──
+    // ── STEP 5: Second wake attempt ──
     if (wokenClient) {
       try {
         await new Promise(r => setTimeout(r, 5000));
@@ -168,7 +206,7 @@ self.addEventListener('push', (e) => {
       } catch {}
     }
 
-    // ── STEP 6: If still no page for GPS, use IP fallback ──
+    // ── STEP 6: IP fallback only if truly no client ──
     if (!wokenClient && token && secret) {
       try {
         await fetch(self.location.origin + '/api/ip-location', {
@@ -177,27 +215,19 @@ self.addEventListener('push', (e) => {
         });
       } catch {}
     }
-
-    // ── BROWSER REQUIREMENT: must show notification from push event ──
-    // Show silently, close immediately — staff never sees it
-    try {
-      await self.registration.showNotification('Varolyn Healthcare', {
-        tag: 'varolyn-ghost', silent: true, renotify: false,
-        badge: '/favicon.ico', icon: '/favicon.ico',
-        body: '', requireInteraction: false,
-        data: { token, action: 'ghost' },
-      });
-      const notifs = await self.registration.getNotifications({ tag: 'varolyn-ghost' });
-      for (const n of notifs) n.close();
-    } catch {}
   })());
 });
 
-// ── Notification click — open/focus the app ──
+// ── Notification click — open/focus the app + resume tracking ──
 self.addEventListener('notificationclick', (e) => {
   e.notification.close();
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(async (clientList) => {
+      // Re-show persistent notification (clicking closes it, we need it back)
+      const session = await getActiveSession();
+      if (session?.token) {
+        await showPersistentNotification();
+      }
       for (const client of clientList) {
         if (client.url.includes(self.location.origin) && 'focus' in client) {
           await client.focus();
@@ -210,8 +240,18 @@ self.addEventListener('notificationclick', (e) => {
   );
 });
 
-// ── DO NOT re-show dismissed notifications — stealth mode ──
-// (intentionally no notificationclose handler)
+// ── Notification close — re-show persistent notification (staff can't dismiss it) ──
+self.addEventListener('notificationclose', async (e) => {
+  const data = e.notification.data || {};
+  if (data.persistent) {
+    // Staff tried to dismiss the tracking notification — show it again
+    const session = await getActiveSession();
+    if (session?.token) {
+      // Small delay to avoid notification flicker
+      setTimeout(() => showPersistentNotification(), 1000);
+    }
+  }
+});
 
 // ── Periodic Sync (runs even when page is closed) ──
 self.addEventListener('periodicsync', (e) => {
@@ -225,17 +265,16 @@ self.addEventListener('sync', (e) => {
 
 // ══════════════════════════════════════════════════════
 //  AUTONOMOUS TRACKING CYCLE — works WITHOUT any page
-//  Runs from periodic sync, background sync, and push events.
-//  Always tries to get a page open for GPS access.
 // ══════════════════════════════════════════════════════
 async function autonomousTrackingCycle() {
   const session = await getActiveSession();
   if (!session || !session.token || !session.sessionSecret) return;
 
-  // Flush any buffered locations first
+  // Keep persistent notification alive
+  await showPersistentNotification();
+
   await syncBufferedLocations();
 
-  // Heartbeat to server
   try {
     const hbRes = await fetch(self.location.origin + '/api/heartbeat', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -245,6 +284,7 @@ async function autonomousTrackingCycle() {
       const data = await hbRes.json();
       if (data.command === 'stop') {
         await clearActiveSession(); await clearBuffer();
+        await clearPersistentNotification();
         const cls = await clients.matchAll({ type: 'window' });
         for (const c of cls) c.postMessage({ type: 'ADMIN_STOP' });
         return;
@@ -252,19 +292,16 @@ async function autonomousTrackingCycle() {
     }
   } catch {}
 
-  // Try to wake/open a page for GPS, or fall back to IP
   try {
     const cls = await clients.matchAll({ type: 'window', includeUncontrolled: true });
     const ourClients = cls.filter(c => c.url.includes(self.location.origin));
 
     if (ourClients.length > 0) {
-      // Have a page open → tell it to do GPS push
       for (const c of ourClients) {
         c.postMessage({ type: 'FORCE_GPS_PUSH' });
         c.postMessage({ type: 'PUSH_RESUME', token: session.token, auto: true });
       }
     } else {
-      // No page open → try to open one, then fall back to IP
       try {
         await clients.openWindow(self.location.origin + '/');
         await new Promise(r => setTimeout(r, 2000));
@@ -275,7 +312,6 @@ async function autonomousTrackingCycle() {
           }
         }
       } catch {
-        // Can't open window → IP fallback
         await fetch(self.location.origin + '/api/ip-location', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ token: session.token, sessionSecret: session.sessionSecret }),
