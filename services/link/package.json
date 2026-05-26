@@ -1,0 +1,12 @@
+{
+  "name": "@varolyn/link-service",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": { "start": "node src/index.js", "dev": "node --watch src/index.js" },
+  "dependencies": {
+    "fastify": "^4.28.0",
+    "@fastify/cors": "^9.0.1",
+    "pg": "^8.13.0",
+    "jsonwebtoken": "^9.0.2"
+  }
+}

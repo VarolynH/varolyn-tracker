@@ -1,0 +1,27 @@
+{
+  "name": "varolyn-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Varolyn Healthcare — Zomato-style live tracking for home healthcare visits (100% web-based PWA, free & open-source)",
+  "workspaces": [
+    "shared/*",
+    "services/*",
+    "web/*"
+  ],
+  "scripts": {
+    "dev": "docker-compose -f infrastructure/docker-compose.yml up --build",
+    "dev:services": "concurrently \"npm run dev --workspace=services/gateway\" \"npm run dev --workspace=services/tracking\" \"npm run dev --workspace=services/consent\" \"npm run dev --workspace=services/appointment\" \"npm run dev --workspace=services/link\" \"npm run dev --workspace=services/notification\" \"npm run dev --workspace=services/audit\"",
+    "build": "npm run build --workspaces --if-present",
+    "test": "node tests/unit-tests.js",
+    "lint": "eslint . --ext .js,.jsx,.ts,.tsx",
+    "generate:vapid": "node scripts/generate-vapid.js",
+    "generate:jwt-secret": "node -e \"console.log(require('crypto').randomBytes(64).toString('hex'))\"",
+    "db:migrate": "node shared/db/migrate.js",
+    "purge:expired": "node scripts/purge-expired-data.js"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "eslint": "^8.56.0",
+    "web-push": "^3.6.7"
+  }
+}

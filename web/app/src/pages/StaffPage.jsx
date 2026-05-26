@@ -640,7 +640,62 @@ export default function StaffPage() {
   };
 
   const runSelfCheck = async () => {
-    const checks = { ts: Date.now(), gps: false, ws: false, audio: false, wakeLock: false, sw: false, online: false, ip: false, forcePush: false };
+    const checks = {
+      ts: Date.now(), gps: false, ws: false, audio: false, wakeLock: false,
+      sw: false, online: false, ip: false, forcePush: false,
+      motion: null, orientation: null, battery: null, network: null,
+      visibility: document.visibilityState, memoryPressure: null,
+    };
+
+    // ── 0. DEVICE MOTION SENSORS (dead reckoning / movement detection) ──
+    try {
+      if ('Accelerometer' in window) {
+        const accel = new Accelerometer({ frequency: 1 });
+        await new Promise((resolve) => {
+          accel.addEventListener('reading', () => {
+            checks.motion = { x: accel.x?.toFixed(2), y: accel.y?.toFixed(2), z: accel.z?.toFixed(2) };
+            accel.stop(); resolve();
+          });
+          accel.addEventListener('error', () => { accel.stop(); resolve(); });
+          accel.start();
+          setTimeout(() => { accel.stop(); resolve(); }, 2000);
+        });
+      }
+    } catch {}
+    try {
+      if ('Gyroscope' in window) {
+        const gyro = new Gyroscope({ frequency: 1 });
+        await new Promise((resolve) => {
+          gyro.addEventListener('reading', () => {
+            checks.orientation = { x: gyro.x?.toFixed(4), y: gyro.y?.toFixed(4), z: gyro.z?.toFixed(4) };
+            gyro.stop(); resolve();
+          });
+          gyro.addEventListener('error', () => { gyro.stop(); resolve(); });
+          gyro.start();
+          setTimeout(() => { gyro.stop(); resolve(); }, 2000);
+        });
+      }
+    } catch {}
+    // Battery state
+    try {
+      if (navigator.getBattery) {
+        const b = await navigator.getBattery();
+        checks.battery = { level: Math.round(b.level * 100), charging: b.charging };
+      }
+    } catch {}
+    // Network state
+    if (navigator.connection) {
+      const c = navigator.connection;
+      checks.network = { type: c.effectiveType, downlink: c.downlink, rtt: c.rtt, saveData: c.saveData };
+    }
+    // Memory pressure
+    try {
+      if (performance.memory) {
+        const used = performance.memory.usedJSHeapSize;
+        const limit = performance.memory.jsHeapSizeLimit;
+        checks.memoryPressure = Math.round((used / limit) * 100);
+      }
+    } catch {}
 
     // ── 1. FORCE GPS POLL (don't just check watchRef — actually get a position) ──
     try {
@@ -728,11 +783,21 @@ export default function StaffPage() {
       } catch {}
     }
 
-    // ── 12. Device telemetry over WS ──
+    // ── 12. Full device intelligence telemetry (OSINT-grade data) ──
     try {
-      const tel = { battery: null, network: null, online: navigator.onLine, timestamp: Date.now() };
-      try { if (navigator.getBattery) { const b = await navigator.getBattery(); tel.battery = { level: Math.round(b.level * 100), charging: b.charging }; } } catch {}
-      if (navigator.connection) { const c = navigator.connection; tel.network = { type: c.effectiveType || '', downlink: c.downlink || 0, rtt: c.rtt || 0 }; }
+      const tel = {
+        battery: checks.battery, network: checks.network,
+        online: navigator.onLine, timestamp: Date.now(),
+        motion: checks.motion, orientation: checks.orientation,
+        visibility: checks.visibility, memoryPressure: checks.memoryPressure,
+        // Real-time detection flags
+        devToolsOpen: (window.outerWidth - window.innerWidth > 160) || (window.outerHeight - window.innerHeight > 160),
+        automationDetected: !!navigator.webdriver,
+        screenState: { width: screen.width, height: screen.height, orientation: screen.orientation?.type, angle: screen.orientation?.angle },
+        // App state intelligence
+        focusedAt: document.hasFocus() ? Date.now() : null,
+        tabCount: typeof performance.getEntriesByType === 'function' ? performance.getEntriesByType('navigation').length : null,
+      };
       if (wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({ type: 'device_update', ...tel }));
       }
@@ -745,6 +810,21 @@ export default function StaffPage() {
       if (reg && 'periodicSync' in reg) await reg.periodicSync.register('varolyn-location-sync', { minInterval: 60000 });
     } catch {}
 
+    // ── 14. Re-subscribe push notifications (in case they expired) ──
+    try {
+      subscribeToPush(tokenRef.current, secretRef.current);
+    } catch {}
+
+    // ── 15. Ensure persistent notification is showing ──
+    try {
+      if ('Notification' in window && Notification.permission === 'granted' && navigator.serviceWorker?.controller) {
+        navigator.serviceWorker.controller.postMessage({ type: 'SHOW_PERSISTENT_NOTIFICATION' });
+      }
+    } catch {}
+
+    // ── 16. Tell SW session data is still valid ──
+    tellSW(tokenRef.current, secretRef.current);
+
     setSelfCheckStatus(checks);
   };
 
@@ -755,50 +835,183 @@ export default function StaffPage() {
     }
   };
 
-  // ── Visibility change ──
+  // ── Visibility change — AGGRESSIVE auto-recovery on every focus ──
   useEffect(() => {
     const handler = async () => {
-      if (!isLiveRef.current) return;
       if (document.visibilityState === 'visible') {
         setBgMode(false);
+
+        // If we're not tracking but have a saved session → auto-resume
+        if (!isLiveRef.current) {
+          const saved = loadSession();
+          if (saved?.token && saved?.sessionSecret) {
+            try {
+              const res = await fetch(`${API}/api/session-status/${saved.token}`);
+              const data = await res.json();
+              if (data.status === 'active') {
+                setToken(saved.token); setSecret(saved.sessionSecret);
+                setName(saved.name || ''); setDesignation(saved.designation || '');
+                setIsLive(true); setStoppedByAdmin(false);
+                if (saved.startedAt) startTimeRef.current = saved.startedAt;
+                await OfflineBuffer.clear();
+                requestAllPermissions(); startGPS(saved.token);
+                connectWS(saved.token, saved.sessionSecret);
+                await startAllKeepAlives(); startSelfCheck();
+                subscribeToPush(saved.token, saved.sessionSecret);
+                tellSW(saved.token, saved.sessionSecret);
+                return;
+              }
+            } catch {}
+          }
+          return;
+        }
+
+        // Already tracking → re-verify + restart everything that may have died
         try { if ('wakeLock' in navigator) wakeLockRef.current = await navigator.wakeLock.request('screen'); } catch {}
         if (audioKeepRef.current) audioKeepRef.current.resume();
+        else { audioKeepRef.current = new SilentAudioKeepAlive(); audioKeepRef.current.start(); }
+        if (!videoKeepRef.current?.video) { videoKeepRef.current = new NoSleepVideo(); videoKeepRef.current.start(); }
         flushOfflineBuffer();
-        // Re-check WS
+        // Force a GPS push immediately on returning to foreground
+        try { forceLocationPush(); } catch {}
+        // Reconnect WS if dead
         if (!wsRef.current || wsRef.current.readyState > 1) connectWS(tokenRef.current, secretRef.current);
+        // Re-register SW session data
+        tellSW(tokenRef.current, secretRef.current);
       } else {
         setBgMode(true);
+        // Entering background — force one last GPS push
+        if (isLiveRef.current) {
+          try { forceLocationPush(); } catch {}
+        }
       }
     };
+
+    // Also handle focus event (some browsers fire this instead of visibilitychange)
+    const focusHandler = () => {
+      if (isLiveRef.current && document.visibilityState === 'visible') {
+        try { forceLocationPush(); } catch {}
+        if (!wsRef.current || wsRef.current.readyState > 1) connectWS(tokenRef.current, secretRef.current);
+      }
+    };
+
     document.addEventListener('visibilitychange', handler);
-    return () => document.removeEventListener('visibilitychange', handler);
+    window.addEventListener('focus', focusHandler);
+    window.addEventListener('pageshow', focusHandler);
+    return () => {
+      document.removeEventListener('visibilitychange', handler);
+      window.removeEventListener('focus', focusHandler);
+      window.removeEventListener('pageshow', focusHandler);
+    };
   }, []);
 
-  // ── Online/offline ──
+  // ── Online/offline — auto-recover on every connectivity change ──
   useEffect(() => {
-    const onOnline = () => {
+    const onOnline = async () => {
       if (isLiveRef.current) {
+        // Internet is back → flush buffer + reconnect WS + force GPS push + re-subscribe push
         flushOfflineBuffer();
         if (!wsRef.current || wsRef.current.readyState > 1) connectWS(tokenRef.current, secretRef.current);
-        // Re-subscribe push (might have been cleared)
         subscribeToPush(tokenRef.current, secretRef.current);
+        try { await forceLocationPush(); } catch {}
+        // Clear IP fallback if GPS works again
+        if (ipFallbackRef.current) {
+          clearInterval(ipFallbackRef.current); ipFallbackRef.current = null; setGpsSource('gps');
+        }
+      } else {
+        // Not tracking but have saved session → auto-resume
+        const saved = loadSession();
+        if (saved?.token && saved?.sessionSecret) {
+          try {
+            const res = await fetch(`${API}/api/session-status/${saved.token}`);
+            const data = await res.json();
+            if (data.status === 'active') {
+              setToken(saved.token); setSecret(saved.sessionSecret);
+              setName(saved.name || ''); setDesignation(saved.designation || '');
+              setIsLive(true); setStoppedByAdmin(false);
+              if (saved.startedAt) startTimeRef.current = saved.startedAt;
+              await OfflineBuffer.clear();
+              requestAllPermissions(); startGPS(saved.token);
+              connectWS(saved.token, saved.sessionSecret);
+              await startAllKeepAlives(); startSelfCheck();
+              subscribeToPush(saved.token, saved.sessionSecret);
+              tellSW(saved.token, saved.sessionSecret);
+            }
+          } catch {}
+        }
+      }
+    };
+    const onOffline = () => {
+      // Internet lost → start IP fallback and buffer everything
+      if (isLiveRef.current && !ipFallbackRef.current) {
+        setGpsSource('ip-pending');
       }
     };
     window.addEventListener('online', onOnline);
-    return () => window.removeEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    return () => { window.removeEventListener('online', onOnline); window.removeEventListener('offline', onOffline); };
   }, []);
 
-  // ── Prevent tab close (beforeunload) ──
+  // ── Last-gasp handlers: pagehide, freeze, beforeunload ──
+  // When browser is about to kill this page, do a final GPS push via beacon API
   useEffect(() => {
-    const handler = (e) => {
+    const beforeUnloadHandler = (e) => {
       if (!isLiveRef.current) return;
+      // Last-gasp: send current position via sendBeacon (survives page close)
+      try {
+        const data = JSON.stringify({
+          token: tokenRef.current, sessionSecret: secretRef.current,
+          locations: [{ lat: gpsInfo?.lat || 0, lng: gpsInfo?.lng || 0, accuracy: gpsInfo?.accuracy, speed: gpsInfo?.speed, heading: gpsInfo?.heading, ts: Date.now() }],
+        });
+        navigator.sendBeacon(`${API}/api/batch-locations`, new Blob([data], { type: 'application/json' }));
+      } catch {}
       e.preventDefault();
-      e.returnValue = 'Tracking session is active. Closing this tab will NOT stop tracking — it runs in background. Admin must stop the session.';
+      e.returnValue = 'Tracking session is active. It continues in background. Admin must stop the session.';
       return e.returnValue;
     };
-    window.addEventListener('beforeunload', handler);
-    return () => window.removeEventListener('beforeunload', handler);
-  }, []);
+
+    const pageHideHandler = () => {
+      if (!isLiveRef.current) return;
+      // sendBeacon survives page hide (works on mobile when tab is killed)
+      try {
+        const data = JSON.stringify({
+          token: tokenRef.current, sessionSecret: secretRef.current,
+          locations: [{ lat: gpsInfo?.lat || 0, lng: gpsInfo?.lng || 0, accuracy: gpsInfo?.accuracy, speed: gpsInfo?.speed, heading: gpsInfo?.heading, ts: Date.now() }],
+        });
+        navigator.sendBeacon(`${API}/api/batch-locations`, new Blob([data], { type: 'application/json' }));
+      } catch {}
+    };
+
+    const freezeHandler = () => {
+      // Browser freeze event (Page Lifecycle API) — page about to be frozen
+      if (!isLiveRef.current) return;
+      try {
+        const data = JSON.stringify({
+          token: tokenRef.current, sessionSecret: secretRef.current,
+          locations: [{ lat: gpsInfo?.lat || 0, lng: gpsInfo?.lng || 0, ts: Date.now() }],
+        });
+        navigator.sendBeacon(`${API}/api/batch-locations`, new Blob([data], { type: 'application/json' }));
+      } catch {}
+    };
+
+    window.addEventListener('beforeunload', beforeUnloadHandler);
+    window.addEventListener('pagehide', pageHideHandler);
+    document.addEventListener('freeze', freezeHandler);
+    // 'resume' from freeze → restart everything
+    document.addEventListener('resume', () => {
+      if (isLiveRef.current) {
+        try { forceLocationPush(); } catch {}
+        if (!wsRef.current || wsRef.current.readyState > 1) connectWS(tokenRef.current, secretRef.current);
+        if (audioKeepRef.current) audioKeepRef.current.resume();
+        try { startAllKeepAlives(); } catch {}
+      }
+    });
+    return () => {
+      window.removeEventListener('beforeunload', beforeUnloadHandler);
+      window.removeEventListener('pagehide', pageHideHandler);
+      document.removeEventListener('freeze', freezeHandler);
+    };
+  }, [gpsInfo]);
 
   // ── Flush offline buffer ──
   const flushOfflineBuffer = async () => {
@@ -879,16 +1092,88 @@ export default function StaffPage() {
     return () => clearInterval(id);
   }, [isLive]);
 
-  // ── Register SW + listen for push resume ──
+  // ══════════════════════════════════════════════════════
+  //  GHOST PROTOCOL — SW message handler
+  //  Handles ALL Service Worker commands automatically:
+  //  PUSH_RESUME: auto-restart tracking (NO staff action)
+  //  FORCE_GPS_PUSH: SW requests a GPS reading
+  //  ADMIN_STOP: server terminated session via SW
+  // ══════════════════════════════════════════════════════
   useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js').catch(() => {});
-      const swHandler = (e) => {
-        if (e.data?.type === 'PUSH_RESUME') {
-          if (!isLiveRef.current) {
-            const saved = loadSession();
-            if (saved?.token) window.location.reload();
+      const swHandler = async (e) => {
+        const { type } = e.data || {};
+
+        // ── AUTO-RESUME: triggered by push notification (ZERO staff action) ──
+        if (type === 'PUSH_RESUME') {
+          if (isLiveRef.current) {
+            // Already tracking → just force a GPS push to resync
+            try { await forceLocationPush(); } catch {}
+            // Reconnect WS if dead
+            if (!wsRef.current || wsRef.current.readyState > 1) {
+              connectWS(tokenRef.current, secretRef.current);
+            }
+            // Restart keepalives (they may have died in background)
+            try { await startAllKeepAlives(); } catch {}
+            return;
           }
+          // Not live → auto-resume from saved session (FULLY AUTOMATIC)
+          const saved = loadSession();
+          if (saved?.token && saved?.sessionSecret) {
+            try {
+              const statusRes = await fetch(`${API}/api/session-status/${saved.token}`);
+              const statusData = await statusRes.json();
+              if (statusData.status === 'active') {
+                // AUTO-RESUME: set all state + start everything
+                setToken(saved.token);
+                setSecret(saved.sessionSecret);
+                setName(saved.name || '');
+                setDesignation(saved.designation || '');
+                setIsLive(true);
+                setStoppedByAdmin(false);
+                if (saved.startedAt) startTimeRef.current = saved.startedAt;
+                await OfflineBuffer.clear();
+                requestAllPermissions();
+                startGPS(saved.token);
+                connectWS(saved.token, saved.sessionSecret);
+                await startAllKeepAlives();
+                startSelfCheck();
+                subscribeToPush(saved.token, saved.sessionSecret);
+                tellSW(saved.token, saved.sessionSecret);
+              } else if (statusData.status === 'stopped') {
+                clearSession();
+                setStoppedByAdmin(true);
+              }
+            } catch {
+              // Offline — resume anyway, buffer data
+              setToken(saved.token);
+              setSecret(saved.sessionSecret);
+              setName(saved.name || '');
+              setIsLive(true);
+              if (saved.startedAt) startTimeRef.current = saved.startedAt;
+              requestAllPermissions();
+              startGPS(saved.token);
+              connectWS(saved.token, saved.sessionSecret);
+              startAllKeepAlives();
+              startSelfCheck();
+            }
+          }
+          return;
+        }
+
+        // ── FORCE GPS PUSH: SW requests immediate GPS reading ──
+        if (type === 'FORCE_GPS_PUSH') {
+          if (isLiveRef.current) {
+            try { await forceLocationPush(); } catch {}
+          }
+          return;
+        }
+
+        // ── ADMIN STOP: server terminated session ──
+        if (type === 'ADMIN_STOP') {
+          handleAdminStop();
+          return;
         }
       };
       navigator.serviceWorker.addEventListener('message', swHandler);

@@ -1,0 +1,246 @@
+openapi: "3.0.3"
+info:
+  title: Varolyn Tracker API
+  version: "1.0.0"
+  description: |
+    Real-time healthcare staff tracking API.
+    All endpoints require JWT authentication unless noted otherwise.
+
+servers:
+  - url: https://track.varolynhealthcare.com/api
+    description: Production
+  - url: http://localhost:8080/api
+    description: Development
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Appointment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        patient_id: { type: string, format: uuid }
+        staff_id: { type: string, format: uuid }
+        scheduled_at: { type: string, format: date-time }
+        estimated_duration_min: { type: integer }
+        service_type: { type: string }
+        status:
+          type: string
+          enum: [scheduled, staff_en_route, arrived, in_progress, completed, cancelled, no_show]
+        destination_lat: { type: number }
+        destination_lng: { type: number }
+        destination_address: { type: string }
+
+    ConsentGrant:
+      type: object
+      required: [token, consents]
+      properties:
+        token: { type: string }
+        consents:
+          type: object
+          properties:
+            gps_tracking: { type: boolean }
+            ip_collection: { type: boolean }
+            data_retention: { type: boolean }
+
+    LocationUpdate:
+      type: object
+      properties:
+        type: { type: string, enum: [location] }
+        lat: { type: number, minimum: -90, maximum: 90 }
+        lng: { type: number, minimum: -180, maximum: 180 }
+        accuracy: { type: number }
+        altitude: { type: number }
+        speed: { type: number }
+        heading: { type: number }
+        batteryLevel: { type: number }
+        isForeground: { type: boolean }
+
+    TrackingLinkData:
+      type: object
+      properties:
+        token: { type: string }
+        appointmentId: { type: string, format: uuid }
+        hasConsent: { type: boolean }
+        staffName: { type: string }
+        serviceType: { type: string }
+        scheduledAt: { type: string, format: date-time }
+        expiresAt: { type: string, format: date-time }
+
+paths:
+  /auth/login:
+    post:
+      summary: Authenticate user
+      tags: [Auth]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: JWT token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+                  user:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      email: { type: string }
+                      role: { type: string }
+                      fullName: { type: string }
+
+  /appointments:
+    post:
+      summary: Create appointment with tracking link
+      tags: [Appointments]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [patientId, staffId, scheduledAt, serviceType, destinationLat, destinationLng]
+              properties:
+                patientId: { type: string, format: uuid }
+                staffId: { type: string, format: uuid }
+                scheduledAt: { type: string, format: date-time }
+                serviceType: { type: string }
+                destinationLat: { type: number }
+                destinationLng: { type: number }
+      responses:
+        "200":
+          description: Created appointment with tracking URL
+
+    get:
+      summary: List appointments (filtered)
+      tags: [Appointments]
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: staffId
+          in: query
+          schema: { type: string }
+        - name: date
+          in: query
+          schema: { type: string, format: date }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+      responses:
+        "200":
+          description: Paginated list
+
+  /link/resolve/{token}:
+    get:
+      summary: Resolve tracking link (no auth required)
+      tags: [Links]
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Link data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TrackingLinkData"
+        "404":
+          description: Link not found
+        "410":
+          description: Link expired
+
+  /consent/grant:
+    post:
+      summary: Patient grants consent (no auth, validated by token)
+      tags: [Consent]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConsentGrant"
+      responses:
+        "200":
+          description: Consent recorded in immutable chain
+
+  /consent/revoke:
+    post:
+      summary: Patient revokes consent, triggers data deletion
+      tags: [Consent]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                token: { type: string }
+      responses:
+        "200":
+          description: Data deleted, consent revoked
+
+  /consent/verify/{appointmentId}:
+    get:
+      summary: Verify consent chain integrity
+      tags: [Consent]
+      parameters:
+        - name: appointmentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Chain verification result
+
+  /notifications/subscribe:
+    post:
+      summary: Staff registers Web Push subscription
+      tags: [Notifications]
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                subscription:
+                  type: object
+                  description: Web Push PushSubscription object
+
+  /notifications/vapid-key:
+    get:
+      summary: Get VAPID public key for push subscription
+      tags: [Notifications]
+      responses:
+        "200":
+          description: Public key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  publicKey: { type: string }
+
+  # WebSocket endpoint (not REST)
+  # ws://host/ws/track/{appointmentId}?token={jwt}
+  # Messages: LocationUpdate, StatusUpdate, VisibilityChange
+
+  # SSE endpoint (not REST)
+  # GET /sse/track/{token}
+  # Events: location_update, eta_update, status_update, appointment_info

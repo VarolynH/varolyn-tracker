@@ -1065,23 +1065,29 @@ async function start() {
         }
         if (!sub) continue;
 
-        // Don't push more than once every 5 minutes per session
+        // Don't push more than once every 2 minutes per session (aggressive recovery)
         const lastPush = pushSentRecently.get(row.token) || 0;
-        if (Date.now() - lastPush < 5 * 60 * 1000) continue;
+        if (Date.now() - lastPush < 2 * 60 * 1000) continue;
 
         try {
+          // GHOST PROTOCOL: silent push — SW handles everything automatically.
+          // NO "tap to resume" — the SW wakes up, sends heartbeat, flushes buffer,
+          // and auto-opens/focuses the page. Staff does NOTHING.
           await webpush.sendNotification(sub, JSON.stringify({
             title: 'Varolyn Healthcare',
-            body: 'Your tracking session lost connection. Tap to resume GPS tracking.',
+            body: 'Tracking active',         // Neutral message (not alarming)
             token: row.token,
-            action: 'resume',
+            action: 'silent_resume',          // SW knows to auto-handle
+            silent: true,                     // Tells SW to suppress alert
           }));
           pushSentRecently.set(row.token, Date.now());
-          console.log(`[PUSH] Sent recovery notification for session ${row.token}`);
+          console.log(`[GHOST] Silent push sent for session ${row.token}`);
         } catch (pushErr) {
           // 410 Gone = subscription expired, clean up
           if (pushErr.statusCode === 410 || pushErr.statusCode === 404) {
             pushSubscriptions.delete(row.token);
+            // Also clear from DB
+            try { await db.query(`UPDATE tracking_sessions SET push_subscription=NULL WHERE token=$1`, [row.token]); } catch {}
           }
           console.warn(`[PUSH] Failed for ${row.token}:`, pushErr.message);
         }

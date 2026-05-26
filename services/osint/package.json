@@ -1,0 +1,7 @@
+{
+  "name": "@varolyn/osint-service",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": { "start": "node src/index.js" },
+  "dependencies": { "fastify": "^4.28.0", "@fastify/cors": "^9.0.1", "maxmind": "^4.3.18" }
+}

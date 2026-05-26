@@ -1,0 +1,252 @@
+# ============================================================
+# Varolyn Tracker — Full Stack (single docker-compose up)
+# Free self-hosted: PostgreSQL+TimescaleDB, Redis, OSRM, Traefik
+# ============================================================
+version: "3.9"
+
+x-node-service: &node-service
+  restart: unless-stopped
+  env_file: ../.env
+  networks:
+    - varolyn
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  # ── Reverse Proxy / API Gateway ──────────────────────────
+  traefik:
+    image: traefik:v2.11
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entryPoints.web.address=:80"
+      - "--entryPoints.websecure.address=:443"
+      - "--certificatesresolvers.le.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.le.acme.email=${VAPID_SUBJECT:-admin@varolynhealthcare.com}"
+      - "--certificatesresolvers.le.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8090:8080"   # Traefik dashboard (dev only)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certs:/letsencrypt
+    networks:
+      - varolyn
+
+  # ── PostgreSQL + TimescaleDB ─────────────────────────────
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-varolyn_tracker}
+      POSTGRES_USER: ${POSTGRES_USER:-varolyn}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-varolyn_dev_pass}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-varolyn}"]
+      interval: 5s
+      retries: 10
+    networks:
+      - varolyn
+
+  # ── Redis ────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    networks:
+      - varolyn
+
+  # ── OSRM (routing/ETA — uses OSM data, free) ────────────
+  osrm:
+    image: osrm/osrm-backend:latest
+    volumes:
+      - osrm-data:/data
+    # Pre-process: download .osm.pbf for your region into osrm-data/
+    # then run: osrm-extract, osrm-partition, osrm-customize
+    # See deploy-free-vm.sh for automated setup
+    command: osrm-routed --algorithm mld /data/region.osrm
+    ports:
+      - "5000:5000"
+    networks:
+      - varolyn
+    profiles:
+      - with-osrm
+
+  # ── Gateway Service ──────────────────────────────────────
+  gateway:
+    <<: *node-service
+    build:
+      context: ../services/gateway
+      dockerfile: Dockerfile
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=PathPrefix(`/api`)"
+      - "traefik.http.services.api.loadbalancer.server.port=8080"
+
+  # ── Appointment Service ──────────────────────────────────
+  appointment:
+    <<: *node-service
+    build:
+      context: ../services/appointment
+      dockerfile: Dockerfile
+    ports:
+      - "${APPOINTMENT_PORT:-8081}:8081"
+
+  # ── Tracking Service (WebSocket + SSE) ───────────────────
+  tracking:
+    <<: *node-service
+    build:
+      context: ../services/tracking
+      dockerfile: Dockerfile
+    ports:
+      - "${TRACKING_PORT:-8082}:8082"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.tracking-ws.rule=PathPrefix(`/ws`)"
+      - "traefik.http.services.tracking-ws.loadbalancer.server.port=8082"
+      - "traefik.http.routers.tracking-sse.rule=PathPrefix(`/sse`)"
+      - "traefik.http.services.tracking-sse.loadbalancer.server.port=8082"
+
+  # ── Consent Service ─────────────────────────────────────
+  consent:
+    <<: *node-service
+    build:
+      context: ../services/consent
+      dockerfile: Dockerfile
+    ports:
+      - "${CONSENT_PORT:-8083}:8083"
+
+  # ── Link Service ────────────────────────────────────────
+  link:
+    <<: *node-service
+    build:
+      context: ../services/link
+      dockerfile: Dockerfile
+    ports:
+      - "${LINK_PORT:-8084}:8084"
+
+  # ── Notification Service (Web Push + Email) ─────────────
+  notification:
+    <<: *node-service
+    build:
+      context: ../services/notification
+      dockerfile: Dockerfile
+    ports:
+      - "${NOTIFICATION_PORT:-8085}:8085"
+
+  # ── Audit Service ───────────────────────────────────────
+  audit:
+    <<: *node-service
+    build:
+      context: ../services/audit
+      dockerfile: Dockerfile
+    ports:
+      - "${AUDIT_PORT:-8087}:8087"
+
+  # ── Admin Service ───────────────────────────────────────
+  admin:
+    <<: *node-service
+    build:
+      context: ../services/admin
+      dockerfile: Dockerfile
+    ports:
+      - "${ADMIN_PORT:-8088}:8088"
+
+  # ── Customer PWA (static build served by nginx) ─────────
+  customer-pwa:
+    build:
+      context: ../web/customer-pwa
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.customer.rule=PathPrefix(`/track`)"
+      - "traefik.http.services.customer.loadbalancer.server.port=80"
+    networks:
+      - varolyn
+
+  # ── Staff PWA ───────────────────────────────────────────
+  staff-pwa:
+    build:
+      context: ../web/staff-pwa
+      dockerfile: Dockerfile
+    ports:
+      - "3002:80"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.staff.rule=PathPrefix(`/staff`)"
+      - "traefik.http.services.staff.loadbalancer.server.port=80"
+    networks:
+      - varolyn
+
+  # ── Admin Dashboard ─────────────────────────────────────
+  admin-dashboard:
+    build:
+      context: ../web/admin-dashboard
+      dockerfile: Dockerfile
+    ports:
+      - "3003:80"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.admin-dash.rule=PathPrefix(`/admin`)"
+      - "traefik.http.services.admin-dash.loadbalancer.server.port=80"
+    networks:
+      - varolyn
+
+  # ── Prometheus (monitoring, free) ────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - promdata:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    networks:
+      - varolyn
+    profiles:
+      - monitoring
+
+  # ── Grafana (dashboards, free) ───────────────────────────
+  grafana:
+    image: grafana/grafana-oss:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    networks:
+      - varolyn
+    profiles:
+      - monitoring
+
+volumes:
+  pgdata:
+  redisdata:
+  traefik-certs:
+  osrm-data:
+  promdata:
+  grafanadata:
+
+networks:
+  varolyn:
+    driver: bridge
