@@ -474,33 +474,51 @@ async function build() {
     return { status: rows[0].status, expiresAt: rows[0].expires_at };
   });
 
-  /** POST /api/ip-location — IP-based geolocation fallback when GPS unavailable */
+  /** POST /api/ip-location — IP-based geolocation fallback when GPS unavailable
+   *  CRITICAL: Will NOT overwrite real GPS data if GPS was updated within the last 3 minutes.
+   *  IP location is only a fallback — accuracy is ~5-18km vs GPS ~10-50m. */
   app.post('/api/ip-location', async (req, reply) => {
     const { token, sessionSecret } = req.body || {};
     if (!token || !sessionSecret) return reply.code(400).send({ error: 'Missing data' });
 
     const sess = await db.query(
-      `SELECT id, session_secret FROM tracking_sessions WHERE token=$1 AND status='active'`, [token]);
+      `SELECT id, session_secret, last_accuracy, last_update FROM tracking_sessions WHERE token=$1 AND status='active'`, [token]);
     if (sess.rows.length === 0 || !safeCompare(sess.rows[0].session_secret, sessionSecret))
       return reply.code(404).send({ error: 'Session not found' });
+
+    // ── GUARD: Do NOT overwrite real GPS data with inaccurate IP location ──
+    // If GPS data exists and is recent (<3 min old) and has good accuracy (<1000m), skip IP update
+    const lastAcc = sess.rows[0].last_accuracy;
+    const lastUpdate = sess.rows[0].last_update;
+    const gpsAge = lastUpdate ? (Date.now() - new Date(lastUpdate).getTime()) : Infinity;
+    const hasRecentGps = lastAcc != null && lastAcc < 1000 && gpsAge < 3 * 60 * 1000;
 
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
     const geo = await ipGeoLookup(ip);
 
     if (geo.status !== 'fail' && geo.lat && geo.lon) {
-      // Update session with IP-based location (lower accuracy ~5km)
-      await db.query(
-        `UPDATE tracking_sessions
-         SET last_lat=$1, last_lng=$2, last_accuracy=5000, last_update=NOW(),
-             ip_geo=$3::jsonb
-         WHERE token=$4`,
-        [geo.lat, geo.lon, JSON.stringify(geo), token]);
+      // Always store IP geo metadata (for OSINT), but ONLY update location if no recent GPS
+      if (hasRecentGps) {
+        // GPS is fresh — only update IP geo metadata, do NOT touch lat/lng/accuracy
+        await db.query(
+          `UPDATE tracking_sessions SET ip_geo=$1::jsonb WHERE token=$2`,
+          [JSON.stringify(geo), token]);
+        // Do NOT publish location_update — GPS data is better
+      } else {
+        // No recent GPS — use IP as fallback location
+        await db.query(
+          `UPDATE tracking_sessions
+           SET last_lat=$1, last_lng=$2, last_accuracy=5000, last_update=NOW(),
+               ip_geo=$3::jsonb
+           WHERE token=$4`,
+          [geo.lat, geo.lon, JSON.stringify(geo), token]);
 
-      await redisPub.publish(`tracking:${token}`, JSON.stringify({
-        type: 'location_update', lat: geo.lat, lng: geo.lon,
-        accuracy: 5000, speed: 0, heading: null,
-        source: 'ip_geolocation', timestamp: Date.now(),
-      }));
+        await redisPub.publish(`tracking:${token}`, JSON.stringify({
+          type: 'location_update', lat: geo.lat, lng: geo.lon,
+          accuracy: 5000, speed: 0, heading: null,
+          source: 'ip_geolocation', timestamp: Date.now(),
+        }));
+      }
     }
 
     return { success: true, location: geo.status !== 'fail' ? { lat: geo.lat, lng: geo.lon, city: geo.city, region: geo.regionName } : null };

@@ -709,13 +709,13 @@ export default function StaffPage() {
             resolve(!!ipLoc);
           } else { resolve(false); }
         },
-        { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+        { enableHighAccuracy: true, maximumAge: 15000, timeout: 12000 }
       );
     });
   };
 
   // ═════════════════════════════════════════════════════
-  //  SELF-CHECK LOOP — every 2 minutes, verify + force-fix everything
+  //  SELF-CHECK LOOP — every 60s, verify + force-fix everything
   // ═════════════════════════════════════════════════════
   const startSelfCheck = () => {
     if (selfCheckRef.current) return;
@@ -1199,13 +1199,17 @@ export default function StaffPage() {
             }).catch(() => {});
           },
           () => {
-            // GPS failed in background — try IP
-            fetch(`${API}/api/ip-location`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current }),
-            }).catch(() => {});
+            // GPS failed in background — only use IP fallback if GPS has failed many times
+            // Don't spam IP fallback as it can overwrite good GPS data on the server
+            gpsFailCountRef.current++;
+            if (gpsFailCountRef.current >= 5) {
+              fetch(`${API}/api/ip-location`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token: tokenRef.current, sessionSecret: secretRef.current }),
+              }).catch(() => {});
+            }
           },
-          { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 }
+          { enableHighAccuracy: true, maximumAge: 10000, timeout: 12000 }
         );
       } catch {}
     }, 15000); // Every 15 seconds — aggressive to survive background throttling
