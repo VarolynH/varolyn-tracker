@@ -2,7 +2,26 @@ import React, { useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
-const TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+// CartoDB Voyager tiles — free, reliable, CORS-friendly, no API key needed
+const MAP_STYLE = {
+  version: 8,
+  sources: {
+    'carto-tiles': {
+      type: 'raster',
+      tiles: [
+        'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+        'https://b.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+        'https://c.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+        'https://d.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+      ],
+      tileSize: 256,
+      maxzoom: 20,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    },
+  },
+  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+  layers: [{ id: 'base-tiles', type: 'raster', source: 'carto-tiles' }],
+};
 
 export default function LiveMap({ location }) {
   const containerRef = useRef(null);
@@ -16,21 +35,11 @@ export default function LiveMap({ location }) {
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: {
-        version: 8,
-        sources: {
-          osm: {
-            type: 'raster',
-            tiles: [TILE_URL],
-            tileSize: 256,
-            attribution: '&copy; OpenStreetMap',
-          },
-        },
-        layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
-      },
+      style: MAP_STYLE,
       center: [77.5946, 12.9716],   // Bangalore default
       zoom: 14,
-      attributionControl: false,
+      attributionControl: true,
+      failIfMajorPerformanceCaveat: false,
     });
 
     map.addControl(new maplibregl.NavigationControl(), 'top-right');

@@ -293,183 +293,243 @@ export default function DashboardPage() {
 }
 
 // ══════════════════════════════════════════════════════
-//  HEATMAP VIEW — All staff on a single map with heatmap overlay
-//  Click any marker to see staff name + details
+//  HEATMAP VIEW — All staff on map with heatmap + markers
+//  Uses OpenStreetMap raster tiles (100% reliable, free)
 // ══════════════════════════════════════════════════════
+
+// Map style using CartoDB Voyager tiles — free, reliable, no API key, CORS-friendly
+const MAP_STYLE = {
+  version: 8,
+  sources: {
+    'carto-tiles': {
+      type: 'raster',
+      tiles: [
+        'https://a.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+        'https://b.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+        'https://c.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+        'https://d.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}@2x.png',
+      ],
+      tileSize: 256,
+      maxzoom: 20,
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> &copy; <a href="https://carto.com/attributions">CARTO</a>',
+    },
+  },
+  glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
+  layers: [{ id: 'base-tiles', type: 'raster', source: 'carto-tiles' }],
+};
+
 function HeatmapView({ sessions, allSessions }) {
   const mapContainer = useRef(null);
   const mapRef = useRef(null);
   const markersRef = useRef([]);
+  const [mapError, setMapError] = useState(false);
+  const [mapReady, setMapReady] = useState(false);
 
-  const staffWithLocation = allSessions.filter(s => s.location?.lat && s.location?.lng);
+  const staffWithLocation = allSessions.filter(s => s.location && s.location.lat && s.location.lng);
 
+  // Initialize map once
   useEffect(() => {
-    if (!mapContainer.current || staffWithLocation.length === 0) return;
+    if (!mapContainer.current) return;
+    if (mapRef.current) return; // already initialized
 
-    // Initialize map centered on first staff or India
     const center = staffWithLocation.length > 0
       ? [staffWithLocation[0].location.lng, staffWithLocation[0].location.lat]
-      : [78.9629, 20.5937]; // India center
+      : [78.9629, 20.5937];
 
-    if (!mapRef.current) {
-      mapRef.current = new maplibregl.Map({
+    let map;
+    try {
+      map = new maplibregl.Map({
         container: mapContainer.current,
-        style: 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json',
-        center, zoom: 12, attributionControl: false,
+        style: MAP_STYLE,
+        center,
+        zoom: staffWithLocation.length > 0 ? 13 : 5,
+        attributionControl: true,
+        failIfMajorPerformanceCaveat: false,
       });
-      mapRef.current.addControl(new maplibregl.NavigationControl(), 'top-right');
-
-      mapRef.current.on('load', () => {
-        updateMapData();
-      });
-    } else {
-      updateMapData();
+    } catch (err) {
+      console.error('[HeatmapView] Map init error:', err);
+      setMapError(true);
+      return;
     }
 
-    function updateMapData() {
-      const map = mapRef.current;
-      if (!map || !map.loaded()) return;
+    map.addControl(new maplibregl.NavigationControl(), 'top-right');
+    mapRef.current = map;
 
-      // Clear old markers
+    map.on('load', () => {
+      setMapReady(true);
+      updateMap(map, staffWithLocation);
+    });
+
+    map.on('error', (e) => {
+      console.warn('[HeatmapView] Map error:', e.error?.message || e.message || 'unknown');
+      // Don't set mapError for tile-level errors (404 on individual tiles);
+      // only set it for fatal style/source errors
+      if (e.error?.message?.includes('style') || e.error?.message?.includes('source')) {
+        setMapError(true);
+      }
+    });
+
+    return () => {
       markersRef.current.forEach(m => m.remove());
       markersRef.current = [];
+      map.remove();
+      mapRef.current = null;
+      setMapReady(false);
+    };
+  }, []);
 
-      // Build GeoJSON for heatmap
-      const features = staffWithLocation.map(s => ({
+  // Update markers + heatmap when data changes
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady) return;
+    try {
+      updateMap(map, staffWithLocation);
+    } catch (err) {
+      console.warn('[HeatmapView] updateMap error:', err);
+    }
+  }, [sessions, allSessions, mapReady]);
+
+  function updateMap(map, staffList) {
+    if (!map) return;
+    // Ensure map style is loaded before adding layers/sources
+    try { if (!map.isStyleLoaded()) return; } catch { return; }
+
+    // Remove old markers
+    markersRef.current.forEach(m => m.remove());
+    markersRef.current = [];
+
+    if (staffList.length === 0) {
+      // Clear heatmap data if no staff
+      try { if (map.getSource('staff-heat')) map.getSource('staff-heat').setData({ type: 'FeatureCollection', features: [] }); } catch {}
+      return;
+    }
+
+    // GeoJSON data
+    const geojson = {
+      type: 'FeatureCollection',
+      features: staffList.map(s => ({
         type: 'Feature',
-        properties: {
-          name: s.staffName, token: s.token, status: s.status,
-          movementState: s.movementState || 'unknown',
-          riskScore: s.riskScore || 0,
-          speed: s.location?.speed || 0,
-        },
+        properties: { name: s.staffName, risk: s.riskScore || 0 },
         geometry: { type: 'Point', coordinates: [s.location.lng, s.location.lat] },
-      }));
+      })),
+    };
 
-      const geojson = { type: 'FeatureCollection', features };
-
-      // Update or add heatmap source
+    // Add/update heatmap layer
+    try {
       if (map.getSource('staff-heat')) {
         map.getSource('staff-heat').setData(geojson);
       } else {
         map.addSource('staff-heat', { type: 'geojson', data: geojson });
-        // Heatmap layer
         map.addLayer({
           id: 'heatmap-layer', type: 'heatmap', source: 'staff-heat',
           paint: {
-            'heatmap-weight': ['interpolate', ['linear'], ['get', 'riskScore'], 0, 0.3, 50, 0.7, 100, 1],
-            'heatmap-intensity': 1.2,
-            'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 8, 30, 14, 50],
-            'heatmap-opacity': 0.6,
+            'heatmap-weight': 1,
+            'heatmap-intensity': 1.5,
+            'heatmap-radius': ['interpolate', ['linear'], ['zoom'], 5, 20, 12, 40, 16, 60],
+            'heatmap-opacity': 0.55,
             'heatmap-color': [
               'interpolate', ['linear'], ['heatmap-density'],
-              0, 'rgba(0,0,255,0)', 0.2, 'rgb(0,200,255)', 0.4, 'rgb(0,255,128)',
-              0.6, 'rgb(255,255,0)', 0.8, 'rgb(255,165,0)', 1, 'rgb(255,0,0)',
+              0, 'rgba(0,0,255,0)', 0.1, 'rgb(65,182,196)', 0.3, 'rgb(127,205,187)',
+              0.5, 'rgb(199,233,180)', 0.7, 'rgb(255,255,178)', 0.85, 'rgb(254,178,76)', 1, 'rgb(240,59,32)',
             ],
           },
         });
       }
-
-      // Add markers for each staff
-      for (const s of staffWithLocation) {
-        const isActive = s.status === 'active';
-        const mvColor = MOVEMENT_COLORS[s.movementState || 'unknown'];
-        const riskHigh = (s.riskScore || 0) > 40;
-
-        const el = document.createElement('div');
-        el.style.cssText = `
-          width:${isActive ? 32 : 22}px; height:${isActive ? 32 : 22}px;
-          border-radius:50%; cursor:pointer; position:relative;
-          background:${isActive ? mvColor : '#9ca3af'};
-          border:3px solid ${riskHigh ? '#dc2626' : '#fff'};
-          box-shadow:0 2px 8px rgba(0,0,0,0.3);
-          display:flex; align-items:center; justify-content:center;
-          font-size:12px; color:#fff; font-weight:700;
-        `;
-        el.textContent = (s.staffName || '?')[0].toUpperCase();
-
-        // Pulsing animation for active
-        if (isActive) {
-          const pulse = document.createElement('div');
-          pulse.style.cssText = `position:absolute;width:100%;height:100%;border-radius:50%;border:2px solid ${mvColor};animation:markerPulse 2s infinite;`;
-          el.appendChild(pulse);
-        }
-
-        // Risk badge
-        if (riskHigh) {
-          const badge = document.createElement('div');
-          badge.style.cssText = 'position:absolute;top:-4px;right:-4px;width:12px;height:12px;border-radius:50%;background:#dc2626;border:2px solid #fff;';
-          el.appendChild(badge);
-        }
-
-        const popup = new maplibregl.Popup({ offset: 20, maxWidth: '260px' }).setHTML(`
-          <div style="font-family:system-ui;padding:4px 0;">
-            <div style="font-weight:700;font-size:14px;margin-bottom:4px;">${safe(s.staffName)}</div>
-            ${s.designation ? `<div style="color:#64748b;font-size:12px;margin-bottom:6px;">${safe(s.designation)}</div>` : ''}
-            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;">
-              <span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${mvColor};color:#fff;">
-                ${MOVEMENT_LABELS[s.movementState || 'unknown']}
-              </span>
-              ${(s.riskScore || 0) > 0 ? `<span style="display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${(s.riskScore||0)>40?'#dc2626':'#f59e0b'};color:#fff;">Risk: ${s.riskScore}</span>` : ''}
-            </div>
-            <div style="font-size:12px;color:#475569;">
-              ${s.location ? `GPS: ${Number(s.location.lat).toFixed(5)}, ${Number(s.location.lng).toFixed(5)}` : ''}
-              ${s.location?.speed > 0 ? `<br/>Speed: ${(s.location.speed * 3.6).toFixed(0)} km/h` : ''}
-              ${s.location?.accuracy ? `<br/>Accuracy: ${Number(s.location.accuracy).toFixed(0)}m` : ''}
-            </div>
-            <div style="margin-top:6px;font-size:11px;color:#9ca3af;">Token: ${s.token}</div>
-          </div>
-        `);
-
-        const marker = new maplibregl.Marker({ element: el })
-          .setLngLat([s.location.lng, s.location.lat])
-          .setPopup(popup)
-          .addTo(map);
-
-        markersRef.current.push(marker);
-      }
-
-      // Fit bounds to show all staff
-      if (staffWithLocation.length > 1) {
-        const bounds = new maplibregl.LngLatBounds();
-        staffWithLocation.forEach(s => bounds.extend([s.location.lng, s.location.lat]));
-        map.fitBounds(bounds, { padding: 60, maxZoom: 15 });
-      } else if (staffWithLocation.length === 1) {
-        map.flyTo({ center: [staffWithLocation[0].location.lng, staffWithLocation[0].location.lat], zoom: 14 });
-      }
+    } catch (err) {
+      console.warn('[HeatmapView] Heatmap layer error:', err);
     }
 
-    return () => {};
-  }, [staffWithLocation.map(s => `${s.token}:${s.location?.lat}:${s.location?.lng}:${s.movementState}:${s.riskScore}`).join('|')]);
+    // Add markers for each staff
+    for (const s of staffList) {
+      const isActive = s.status === 'active';
+      const mvColor = MOVEMENT_COLORS[s.movementState || 'unknown'];
+      const riskHigh = (s.riskScore || 0) > 40;
+      const initial = (s.staffName || '?')[0].toUpperCase();
 
-  // Cleanup map on unmount
-  useEffect(() => { return () => { if (mapRef.current) { mapRef.current.remove(); mapRef.current = null; } }; }, []);
+      const el = document.createElement('div');
+      const size = isActive ? 36 : 24;
+      el.style.cssText = `width:${size}px;height:${size}px;border-radius:50%;cursor:pointer;position:relative;background:${isActive ? mvColor : '#9ca3af'};border:3px solid ${riskHigh ? '#dc2626' : '#fff'};box-shadow:0 2px 8px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;font-size:${isActive?14:11}px;color:#fff;font-weight:700;z-index:${isActive?10:5};`;
+      el.textContent = initial;
+
+      if (isActive) {
+        const ring = document.createElement('div');
+        ring.style.cssText = `position:absolute;inset:-4px;border-radius:50%;border:2px solid ${mvColor};animation:hmPulse 2s infinite;pointer-events:none;`;
+        el.appendChild(ring);
+      }
+      if (riskHigh) {
+        const dot = document.createElement('div');
+        dot.style.cssText = 'position:absolute;top:-3px;right:-3px;width:12px;height:12px;border-radius:50%;background:#dc2626;border:2px solid #fff;';
+        el.appendChild(dot);
+      }
+
+      const speedKmh = s.location.speed ? (Number(s.location.speed) * 3.6).toFixed(0) : null;
+      const popup = new maplibregl.Popup({ offset: 20, maxWidth: '280px' }).setHTML(`
+        <div style="font-family:system-ui,sans-serif;padding:4px 0;">
+          <div style="font-weight:700;font-size:15px;margin-bottom:2px;">${safe(s.staffName)}</div>
+          ${s.designation ? `<div style="color:#64748b;font-size:12px;margin-bottom:6px;">${safe(s.designation)}</div>` : ''}
+          <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;">
+            <span style="padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${mvColor};color:#fff;">${MOVEMENT_LABELS[s.movementState||'unknown']}</span>
+            ${speedKmh ? `<span style="padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:#e0f2fe;color:#0369a1;">${speedKmh} km/h</span>` : ''}
+            ${(s.riskScore||0) > 0 ? `<span style="padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${riskHigh?'#fef2f2':'#fffbeb'};color:${riskHigh?'#dc2626':'#b45309'};border:1px solid ${riskHigh?'#fca5a5':'#fcd34d'};">Risk ${s.riskScore}</span>` : ''}
+          </div>
+          <div style="font-size:12px;color:#475569;line-height:1.6;">
+            GPS: ${Number(s.location.lat).toFixed(5)}, ${Number(s.location.lng).toFixed(5)}<br/>
+            ${s.location.accuracy ? `Accuracy: &plusmn;${Number(s.location.accuracy).toFixed(0)}m<br/>` : ''}
+          </div>
+          <div style="margin-top:4px;font-size:11px;color:#9ca3af;">Token: ${s.token} &middot; ${s.status}</div>
+        </div>
+      `);
+
+      const marker = new maplibregl.Marker({ element: el })
+        .setLngLat([s.location.lng, s.location.lat])
+        .setPopup(popup)
+        .addTo(map);
+      markersRef.current.push(marker);
+    }
+
+    // Fit bounds
+    if (staffList.length > 1) {
+      const bounds = new maplibregl.LngLatBounds();
+      staffList.forEach(s => bounds.extend([s.location.lng, s.location.lat]));
+      map.fitBounds(bounds, { padding: 60, maxZoom: 15 });
+    } else {
+      map.flyTo({ center: [staffList[0].location.lng, staffList[0].location.lat], zoom: 14 });
+    }
+  }
 
   if (staffWithLocation.length === 0) {
     return (
-      <div style={{ textAlign: 'center', padding: 60, color: '#9ca3af' }}>
-        <p>No staff with GPS data to display on map.</p>
-        <p style={{ fontSize: '.85rem' }}>Start a tracking session to see the heatmap.</p>
+      <div style={{ textAlign: 'center', padding: 60, color: '#9ca3af', background: '#f9fafb', borderRadius: 12 }}>
+        <p style={{ fontSize: '2.5rem', marginBottom: 8 }}>&#127758;</p>
+        <p style={{ fontWeight: 600, marginBottom: 4 }}>No GPS data available</p>
+        <p style={{ fontSize: '.85rem' }}>Staff need to start a tracking session with GPS enabled to appear on the map.</p>
+      </div>
+    );
+  }
+
+  if (mapError) {
+    return (
+      <div style={{ textAlign: 'center', padding: 60, color: '#ef4444', background: '#fef2f2', borderRadius: 12, border: '1px solid #fecaca' }}>
+        <p style={{ fontSize: '2rem', marginBottom: 8 }}>&#9888;&#65039;</p>
+        <p style={{ fontWeight: 600, marginBottom: 4 }}>Map failed to load</p>
+        <p style={{ fontSize: '.85rem', color: '#64748b' }}>Check your internet connection or try refreshing the page.</p>
+        <button onClick={() => { setMapError(false); mapRef.current = null; }} className="ctrl-btn" style={{ marginTop: 12, background: 'var(--teal)', color: '#fff', padding: '8px 20px' }}>Retry</button>
       </div>
     );
   }
 
   return (
     <div style={{ marginBottom: 20 }}>
-      {/* Add CSS animation for marker pulse */}
-      <style>{`@keyframes markerPulse { 0% { transform: scale(1); opacity: 0.8; } 50% { transform: scale(1.5); opacity: 0; } 100% { transform: scale(1); opacity: 0; } }`}</style>
-      <div ref={mapContainer} style={{ width: '100%', height: 420, borderRadius: 12, overflow: 'hidden', border: '1px solid #e5e7eb' }} />
-      {/* Legend */}
+      <style>{`@keyframes hmPulse{0%{transform:scale(1);opacity:.7}50%{transform:scale(1.6);opacity:0}100%{transform:scale(1);opacity:0}} .maplibregl-popup-content{border-radius:10px!important;box-shadow:0 4px 20px rgba(0,0,0,.15)!important;padding:12px 14px!important;} .maplibregl-canvas{outline:none;}`}</style>
+      <div ref={mapContainer} style={{ width: '100%', height: 450, borderRadius: 12, overflow: 'hidden', border: '2px solid #e5e7eb' }} />
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 10, fontSize: '.78rem', color: '#64748b' }}>
         {Object.entries(MOVEMENT_LABELS).filter(([k]) => k !== 'unknown').map(([key, label]) => (
           <span key={key} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ width: 10, height: 10, borderRadius: '50%', background: MOVEMENT_COLORS[key] }} />
-            {label}
+            <span style={{ width: 10, height: 10, borderRadius: '50%', background: MOVEMENT_COLORS[key], flexShrink: 0 }} /> {label}
           </span>
         ))}
         <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-          <span style={{ width: 10, height: 10, borderRadius: '50%', background: '#dc2626', border: '2px solid #dc2626' }} />
-          High Risk
+          <span style={{ width: 10, height: 10, borderRadius: '50%', border: '3px solid #dc2626', flexShrink: 0 }} /> High Risk
         </span>
       </div>
     </div>
