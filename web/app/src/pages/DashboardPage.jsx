@@ -463,7 +463,7 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
         {dev.screen && (
           <div className="osint-row">
             <span className="osint-icon">&#128421;</span>
-            <span>Screen: {dev.screen}{dev.pixelRatio > 1 ? ` @${dev.pixelRatio}x` : ''}</span>
+            <span>Screen: {typeof dev.screen === 'string' ? dev.screen : `${dev.screen.width}x${dev.screen.height}`}{dev.pixelRatio > 1 ? ` @${dev.pixelRatio}x` : ''}</span>
           </div>
         )}
         {dev.timezone && (
