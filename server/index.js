@@ -1269,16 +1269,22 @@ async function start() {
     console.log('[DB] Migration checks complete');
   }
 
-  // Seed or update admin user — ALWAYS sync password from env var
-  const existing = await db.query('SELECT id FROM admin_users WHERE email=$1', [ADMIN_EMAIL]);
+  // FORCE reset admin — delete ALL existing admin users and re-create
+  // This guarantees the password matches ADMIN_PASSWORD env var
+  try {
+    await db.query('DELETE FROM admin_users');
+    console.log('[ADMIN] Cleared all admin users for clean re-seed');
+  } catch (e) { console.warn('[ADMIN] Clear failed:', e.message); }
+
   const adminHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
-  if (existing.rows.length === 0) {
-    await db.query('INSERT INTO admin_users (email, password_hash) VALUES ($1,$2)', [ADMIN_EMAIL, adminHash]);
-    console.log(`[ADMIN] Seeded admin: ${ADMIN_EMAIL}`);
-  } else {
-    // Always update password hash to match current ADMIN_PASSWORD env var
-    await db.query('UPDATE admin_users SET password_hash=$1 WHERE email=$2', [adminHash, ADMIN_EMAIL]);
-    console.log(`[ADMIN] Password synced for: ${ADMIN_EMAIL}`);
+  await db.query('INSERT INTO admin_users (email, password_hash) VALUES ($1,$2)', [ADMIN_EMAIL, adminHash]);
+  console.log(`[ADMIN] Seeded admin: ${ADMIN_EMAIL} (password length: ${ADMIN_PASSWORD.length})`);
+
+  // Verify it works immediately
+  const verifyRows = await db.query('SELECT password_hash FROM admin_users WHERE email=$1', [ADMIN_EMAIL]);
+  if (verifyRows.rows.length > 0) {
+    const testMatch = await bcrypt.compare(ADMIN_PASSWORD, verifyRows.rows[0].password_hash);
+    console.log(`[ADMIN] Password verify: ${testMatch ? 'OK' : 'FAILED!'} (email: ${ADMIN_EMAIL})`);
   }
 
   // Redis → SSE bridge
