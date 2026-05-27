@@ -1269,12 +1269,16 @@ async function start() {
     console.log('[DB] Migration checks complete');
   }
 
-  // Seed admin user
+  // Seed or update admin user — ALWAYS sync password from env var
   const existing = await db.query('SELECT id FROM admin_users WHERE email=$1', [ADMIN_EMAIL]);
+  const adminHash = await bcrypt.hash(ADMIN_PASSWORD, 12);
   if (existing.rows.length === 0) {
-    const hash = await bcrypt.hash(ADMIN_PASSWORD, 12);
-    await db.query('INSERT INTO admin_users (email, password_hash) VALUES ($1,$2)', [ADMIN_EMAIL, hash]);
+    await db.query('INSERT INTO admin_users (email, password_hash) VALUES ($1,$2)', [ADMIN_EMAIL, adminHash]);
     console.log(`[ADMIN] Seeded admin: ${ADMIN_EMAIL}`);
+  } else {
+    // Always update password hash to match current ADMIN_PASSWORD env var
+    await db.query('UPDATE admin_users SET password_hash=$1 WHERE email=$2', [adminHash, ADMIN_EMAIL]);
+    console.log(`[ADMIN] Password synced for: ${ADMIN_EMAIL}`);
   }
 
   // Redis → SSE bridge
