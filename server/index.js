@@ -326,7 +326,20 @@ async function build() {
     });
   });
 
-  app.get('/health', async () => ({ status: 'ok', version: 'v10-admin-fix', adminEmail: ADMIN_EMAIL, pwLen: ADMIN_PASSWORD.length }));
+  app.get('/health', async () => ({ status: 'ok', version: 'v11-native-apk', adminEmail: ADMIN_EMAIL, pwLen: ADMIN_PASSWORD.length }));
+
+  // ═════════════════════════════════════════════════════
+  //  APK DOWNLOAD — staff install native app
+  // ═════════════════════════════════════════════════════
+  app.get('/download/app', async (req, reply) => {
+    const apkPath = path.join(__dirname, 'public', 'downloads', 'varolyn-tracker.apk');
+    if (!fs.existsSync(apkPath)) return reply.code(404).send({ error: 'APK not available' });
+    const stat = fs.statSync(apkPath);
+    reply.header('Content-Type', 'application/vnd.android.package-archive');
+    reply.header('Content-Disposition', 'attachment; filename="varolyn-tracker.apk"');
+    reply.header('Content-Length', stat.size);
+    return reply.send(fs.createReadStream(apkPath));
+  });
 
   // ═════════════════════════════════════════════════════
   //  ADMIN AUTH
@@ -735,6 +748,62 @@ async function build() {
 
     await auditLog('batch_sync', null, token, req.ip, { count: phs.length });
     return { success: true, synced: phs.length };
+  });
+
+  // ═════════════════════════════════════════════════════
+  //  NATIVE APP — HTTP Location POST (ForegroundService)
+  //  Native Android app sends GPS via HTTP instead of WebSocket
+  // ═════════════════════════════════════════════════════
+  app.post('/api/location', async (req, reply) => {
+    const auth = req.headers.authorization || '';
+    const token = auth.replace('Bearer ', '').trim();
+    if (!token || !isValidToken(token)) return reply.code(401).send({ error: 'Invalid token' });
+
+    const { lat, lng, accuracy, speed, heading, altitude, timestamp, source } = req.body || {};
+    if (!lat || !lng) return reply.code(400).send({ error: 'lat and lng required' });
+
+    // Verify session is active
+    const sess = await db.query('SELECT id, status FROM tracking_sessions WHERE token=$1', [token]);
+    if (!sess.rows.length || sess.rows[0].status !== 'active') {
+      return reply.code(410).send({ error: 'Session not active' });
+    }
+
+    // Apply Kalman filter
+    const sessionId = sess.rows[0].id;
+    if (!kalmanFilters.has(sessionId)) kalmanFilters.set(sessionId, new GPSKalmanFilter());
+    const kf = kalmanFilters.get(sessionId);
+    const filtered = kf.filter(lat, lng, accuracy || 20, Date.now());
+
+    // Store in DB
+    try {
+      await db.query(
+        `INSERT INTO location_history (session_id, lat, lng, accuracy, speed, heading, source, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())`,
+        [sessionId, filtered.lat, filtered.lng, accuracy || 0, speed || 0, heading || 0, source || 'native_foreground']
+      );
+    } catch (e) { console.warn('[NATIVE LOC] DB insert failed:', e.message); }
+
+    // Update session last_update
+    try {
+      await db.query('UPDATE tracking_sessions SET last_update=NOW() WHERE id=$1', [sessionId]);
+    } catch {}
+
+    // Cache in Redis
+    const locData = { lat: filtered.lat, lng: filtered.lng, accuracy: accuracy || 0, speed: speed || 0, heading: heading || 0, updatedAt: new Date().toISOString() };
+    try {
+      await redisClient.setex(`loc:${token}`, 300, JSON.stringify(locData));
+    } catch {}
+
+    // Publish to SSE for customer tracking page
+    try {
+      await redisPub.publish(`tracking:${token}`, JSON.stringify({
+        type: 'location_update', lat: filtered.lat, lng: filtered.lng,
+        accuracy: accuracy || 0, speed: speed || 0, heading: heading || 0,
+        timestamp: Date.now(),
+      }));
+    } catch {}
+
+    return { success: true, filtered: { lat: filtered.lat, lng: filtered.lng } };
   });
 
   // ═════════════════════════════════════════════════════

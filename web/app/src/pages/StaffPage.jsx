@@ -1845,7 +1845,27 @@ export default function StaffPage() {
         name: name.trim(), designation: designation.trim(), startedAt: Date.now(),
       });
 
-      startGPS(data.token);
+      // ─── Native Android: use ForegroundService for unkillable GPS ───
+      const isNativeAndroid = window.Capacitor?.isNativePlatform?.() && window.Capacitor?.getPlatform?.() === 'android';
+      if (isNativeAndroid && window.Capacitor?.Plugins?.VarolynLocation) {
+        try {
+          const plugin = window.Capacitor.Plugins.VarolynLocation;
+          // Request battery optimization exemption first
+          try { await plugin.requestBatteryOptimization(); } catch {}
+          // Start native foreground service — unkillable GPS
+          const serverUrl = window.location.origin || 'https://varolyn-tracker.onrender.com';
+          await plugin.startTracking({ serverUrl, sessionToken: data.token });
+          console.log('[NATIVE] ForegroundService GPS started — unkillable mode');
+          setGpsSource('native_foreground');
+        } catch (e) {
+          console.warn('[NATIVE] ForegroundService failed, falling back to web GPS:', e);
+          startGPS(data.token);
+        }
+      } else {
+        // Web/PWA mode: use browser geolocation
+        startGPS(data.token);
+      }
+
       connectWS(data.token, data.sessionSecret);
       await startAllKeepAlives();
       startSelfCheck();
@@ -1859,6 +1879,11 @@ export default function StaffPage() {
   //  CLEANUP (admin stop only)
   // ═════════════════════════════════════════════════════
   const handleAdminStop = useCallback(() => {
+    // Stop native foreground service if running
+    const isNativeAndroid = window.Capacitor?.isNativePlatform?.() && window.Capacitor?.getPlatform?.() === 'android';
+    if (isNativeAndroid && window.Capacitor?.Plugins?.VarolynLocation) {
+      try { window.Capacitor.Plugins.VarolynLocation.stopTracking(); } catch {}
+    }
     if (watchRef.current != null) { navigator.geolocation.clearWatch(watchRef.current); watchRef.current = null; }
     if (lowAccuracyWatchRef.current != null) { navigator.geolocation.clearWatch(lowAccuracyWatchRef.current); lowAccuracyWatchRef.current = null; }
     if (ipFallbackRef.current) { clearInterval(ipFallbackRef.current); ipFallbackRef.current = null; }
@@ -2321,9 +2346,35 @@ export default function StaffPage() {
   //  RENDER: Consent Form
   // ═════════════════════════════════════════════════════
   if (!isLive) {
+    // Detect Android browser (not inside Capacitor native app)
+    const isAndroidBrowser = /android/i.test(navigator.userAgent) && !window.Capacitor?.isNativePlatform?.();
+
     return (
       <div className="page">
         <div className="brand"><h1>Varolyn Healthcare</h1><p>Staff Location Tracking</p></div>
+
+        {/* Native App Download Banner — only on Android browser */}
+        {isAndroidBrowser && (
+          <div className="native-app-banner">
+            <div className="native-banner-icon">📱</div>
+            <div className="native-banner-text">
+              <strong>Install Varolyn Tracker App</strong>
+              <p>Native app = unkillable GPS tracking. Works even when phone is locked or app is closed.</p>
+            </div>
+            <a href="/download/app" className="native-banner-btn">Download APK</a>
+          </div>
+        )}
+
+        {window.Capacitor?.isNativePlatform?.() && (
+          <div className="native-app-banner native-active">
+            <div className="native-banner-icon">✅</div>
+            <div className="native-banner-text">
+              <strong>Native App Active</strong>
+              <p>Unkillable ForegroundService GPS enabled. Tracking survives app close, lock, reboot.</p>
+            </div>
+          </div>
+        )}
+
         <div className="card">
           {error && <div className="error-msg">{error}</div>}
           <div className="field">

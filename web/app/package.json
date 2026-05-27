@@ -9,10 +9,13 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@capacitor/android": "^6.2.1",
+    "@capacitor/cli": "^6.2.1",
+    "@capacitor/core": "^6.2.1",
+    "maplibre-gl": "^4.1.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-router-dom": "^6.22.3",
-    "maplibre-gl": "^4.1.2"
+    "react-router-dom": "^6.22.3"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.2.1",

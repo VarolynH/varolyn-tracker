@@ -1,0 +1,19 @@
+{
+  "appId": "com.varolyn.tracker",
+  "appName": "Varolyn Tracker",
+  "webDir": "dist",
+  "server": {
+    "url": "https://varolyn-tracker.onrender.com",
+    "cleartext": true
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_icon",
+      "iconColor": "#0d9488"
+    }
+  },
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#0f172a"
+  }
+}
