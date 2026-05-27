@@ -645,16 +645,11 @@ async function subscribeToPush(tok, secret) {
   } catch (e) { console.warn('[PUSH] Subscribe failed:', e.message); }
 }
 
-/** IP geolocation fallback */
-async function ipLocationFallback(tok, secret) {
-  try {
-    const res = await fetch(`${API}/api/ip-location`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: tok, sessionSecret: secret }),
-    });
-    if (res.ok) { const data = await res.json(); return data.location || null; }
-  } catch {}
-  return null;
+/** IP geolocation — DISABLED. IP is 5-20km wrong (showed Memari instead of Bohar).
+ *  GPS and WiFi/cell triangulation are the ONLY location sources.
+ *  This function now does NOTHING — kept as stub to avoid breaking references. */
+async function ipLocationFallback() {
+  return null; // DISABLED — IP location is too inaccurate, was overwriting real GPS
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1962,18 +1957,12 @@ export default function StaffPage() {
           } catch {}
         }
 
-        // ── TERTIARY: IP geolocation — ABSOLUTE LAST RESORT ──
-        // Only after 10+ GPS failures AND WiFi/cell also failed
-        // IP is 5-20km wrong — server will protect existing GPS data for 30 min
-        if (gpsFailCountRef.current >= 10 && !ipFallbackRef.current) {
-          setGpsSource('ip');
-          setError('GPS & WiFi unavailable — approximate location only');
-          // Only call IP once, not on interval — server protects GPS data anyway
-          ipLocationFallback(tokenRef.current, secretRef.current).then(loc => {
-            if (loc) setGpsInfo({ lat: loc.lat, lng: loc.lng, accuracy: 5000, speed: null, heading: null, source: 'ip' });
-          }).catch(() => {});
-          // Set ref so we don't repeat
-          ipFallbackRef.current = true;
+        // ── IP geolocation: COMPLETELY DISABLED ──
+        // IP was showing Memari instead of Bohar (20km wrong)
+        // Server endpoint is also disabled from updating coordinates
+        // WiFi/cell triangulation above is the last fallback
+        if (gpsFailCountRef.current >= 10) {
+          setError('GPS weak — move to open area for better signal');
         }
       },
       { enableHighAccuracy: true, maximumAge: 2000, timeout: 15000 },

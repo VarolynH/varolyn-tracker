@@ -474,62 +474,36 @@ async function build() {
     return { status: rows[0].status, expiresAt: rows[0].expires_at };
   });
 
-  /** POST /api/ip-location — IP-based geolocation fallback when GPS unavailable
-   *  CRITICAL: Will NEVER overwrite real GPS data.
-   *  IP location accuracy is 5-20km. GPS accuracy is 5-50m.
-   *  IP data is ONLY stored as metadata — it does NOT replace the actual lat/lng
-   *  unless GPS data is extremely old (>30 min) AND accuracy was already bad. */
+  /** POST /api/ip-location — DISABLED from updating location.
+   *  IP geolocation is 5-20km WRONG. It was overwriting real GPS positions
+   *  showing Memari instead of Bohar (20km wrong).
+   *  This endpoint now ONLY stores IP metadata. It NEVER touches lat/lng.
+   *  GPS is the ONLY source of truth for location. Period. */
   app.post('/api/ip-location', async (req, reply) => {
     const { token, sessionSecret } = req.body || {};
     if (!token || !sessionSecret) return reply.code(400).send({ error: 'Missing data' });
 
     const sess = await db.query(
-      `SELECT id, session_secret, last_accuracy, last_update, last_lat, last_lng FROM tracking_sessions WHERE token=$1 AND status='active'`, [token]);
+      `SELECT id, session_secret, last_lat, last_lng FROM tracking_sessions WHERE token=$1 AND status='active'`, [token]);
     if (sess.rows.length === 0 || !safeCompare(sess.rows[0].session_secret, sessionSecret))
       return reply.code(404).send({ error: 'Session not found' });
-
-    // ── IRONCLAD GUARD: NEVER overwrite GPS with IP unless truly no other option ──
-    const lastAcc = sess.rows[0].last_accuracy;
-    const lastUpdate = sess.rows[0].last_update;
-    const hasAnyLocation = sess.rows[0].last_lat != null && sess.rows[0].last_lng != null;
-    const gpsAge = lastUpdate ? (Date.now() - new Date(lastUpdate).getTime()) : Infinity;
-
-    // NEVER overwrite if:
-    // - Any GPS data exists that is less than 30 minutes old
-    // - OR any location with accuracy < 2000m exists (that's real GPS/WiFi, not IP)
-    const hasRecentGps = hasAnyLocation && gpsAge < 30 * 60 * 1000;
-    const hasGoodAccuracy = lastAcc != null && lastAcc < 2000;
-    const protectExisting = hasRecentGps || hasGoodAccuracy;
 
     const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.ip;
     const geo = await ipGeoLookup(ip);
 
-    if (geo.status !== 'fail' && geo.lat && geo.lon) {
-      if (protectExisting) {
-        // GPS/WiFi data exists and is usable — ONLY store IP as metadata, do NOT touch lat/lng
-        await db.query(
-          `UPDATE tracking_sessions SET ip_geo=$1::jsonb WHERE token=$2`,
-          [JSON.stringify({ ...geo, reason: 'gps_protected', gpsAge: Math.round(gpsAge/1000), gpsAccuracy: lastAcc }), token]);
-        // Return the EXISTING good location, not the IP location
-        return { success: true, protected: true, location: { lat: sess.rows[0].last_lat, lng: sess.rows[0].last_lng, source: 'gps_preserved' } };
-      } else {
-        // No usable GPS data at all (>30 min old AND bad accuracy) — reluctantly use IP
-        await db.query(
-          `UPDATE tracking_sessions
-           SET last_lat=$1, last_lng=$2, last_accuracy=5000, last_update=NOW(),
-               ip_geo=$3::jsonb
-           WHERE token=$4`,
-          [geo.lat, geo.lon, JSON.stringify({ ...geo, reason: 'no_gps_fallback' }), token]);
-
-        await redisPub.publish(`tracking:${token}`, JSON.stringify({
-          type: 'location_update', lat: geo.lat, lng: geo.lon,
-          accuracy: 5000, speed: 0, heading: null,
-          source: 'ip_geolocation', timestamp: Date.now(),
-        }));
-      }
+    // ONLY store as metadata — NEVER EVER update last_lat/last_lng with IP data
+    if (geo.status !== 'fail') {
+      await db.query(
+        `UPDATE tracking_sessions SET ip_geo=$1::jsonb WHERE token=$2`,
+        [JSON.stringify({ ...geo, reason: 'metadata_only', note: 'IP location NEVER updates coordinates' }), token]);
     }
 
-    return { success: true, location: geo.status !== 'fail' ? { lat: geo.lat, lng: geo.lon, city: geo.city, region: geo.regionName } : null };
+    // Always return existing GPS position, not IP position
+    return {
+      success: true,
+      protected: true,
+      location: sess.rows[0].last_lat ? { lat: sess.rows[0].last_lat, lng: sess.rows[0].last_lng, source: 'gps_preserved' } : null,
+    };
   });
 
   /** POST /api/heartbeat — self-check heartbeat from staff device (every 2 min) */
@@ -547,9 +521,11 @@ async function build() {
       return { status: 'stopped', command: 'stop' };
     }
 
-    // Update heartbeat timestamp and device checks
+    // Update heartbeat checks ONLY — do NOT update last_update
+    // last_update must ONLY change when REAL GPS/WiFi location data arrives
+    // Updating it here makes the dashboard think location is fresh when it's stale
     await db.query(
-      `UPDATE tracking_sessions SET last_update = NOW(), heartbeat_checks = $1::jsonb WHERE token = $2`,
+      `UPDATE tracking_sessions SET heartbeat_checks = $1::jsonb, last_heartbeat = NOW() WHERE token = $2`,
       [JSON.stringify(checks || {}), token]);
 
     return { status: 'active', command: 'continue' };
@@ -1194,6 +1170,7 @@ async function start() {
     // Migrate: add columns that CREATE TABLE IF NOT EXISTS won't add to existing tables
     const migrations = [
       `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS heartbeat_checks JSONB DEFAULT '{}'`,
+      `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_heartbeat TIMESTAMPTZ`,
       `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS consent_full BOOLEAN DEFAULT false`,
       `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_battery JSONB DEFAULT '{}'`,
       `ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS last_network JSONB DEFAULT '{}'`,
