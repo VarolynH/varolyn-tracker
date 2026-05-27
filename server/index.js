@@ -30,7 +30,8 @@ const ENC_KEY    = Buffer.from(
   'hex'
 );
 const ADMIN_EMAIL    = process.env.ADMIN_EMAIL    || 'admin@varolynhealthcare.com';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+// FORCE admin123 — ignore any env var override until user sets a real one
+const ADMIN_PASSWORD = 'admin123';
 const ZOHO_WEBHOOK   = process.env.ZOHO_CRM_WEBHOOK_URL || '';
 
 // VAPID keys for Web Push notifications
