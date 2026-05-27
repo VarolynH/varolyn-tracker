@@ -1808,12 +1808,24 @@ export default function StaffPage() {
         deviceInfo.settingsConfirmed = settingsConfirmed;
       }
 
+      // Create immutable consent record with SHA-256 hash
+      const consentText = `I, ${name.trim()}, consent to GPS tracking by Varolyn Healthcare. Phone: ${phone.trim()}, Email: ${email.trim()}, Device: ${navigator.userAgent}, Timestamp: ${new Date().toISOString()}`;
+      let consentHash = '';
+      try {
+        const encoder = new TextEncoder();
+        const data = encoder.encode(consentText);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+        consentHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
+      } catch { consentHash = 'sha256_unavailable'; }
+
       const res = await fetch(`${API}/api/start`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           staffName: name.trim(), staffPhone: phone.trim(), staffEmail: email.trim(),
           designation: designation.trim(), consentGps: true,
           consentFull: true,
+          consentHash,
+          consentText,
           deviceInfo,
         }),
       });

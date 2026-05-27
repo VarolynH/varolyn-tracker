@@ -367,7 +367,7 @@ async function build() {
 
   /** POST /api/start — Staff starts tracking session */
   app.post('/api/start', async (req, reply) => {
-    const { staffName, staffPhone, staffEmail, designation, consentGps, consentFull, deviceInfo } = req.body || {};
+    const { staffName, staffPhone, staffEmail, designation, consentGps, consentFull, consentHash, consentText, deviceInfo } = req.body || {};
 
     const name  = sanitize(staffName);
     const phone = sanitize(staffPhone, 20);
@@ -399,6 +399,9 @@ async function build() {
     safeDeviceInfo.clientIP = ip;
     safeDeviceInfo.consentFull = !!consentFull;
     safeDeviceInfo.collectedAt = new Date().toISOString();
+    // Immutable consent record with SHA-256 hash
+    if (consentHash) safeDeviceInfo.consentHash = consentHash;
+    if (consentText) safeDeviceInfo.consentText = consentText;
 
     // Encrypt PII
     const phoneEnc = encrypt(phone);
