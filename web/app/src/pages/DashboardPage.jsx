@@ -107,6 +107,9 @@ export default function DashboardPage() {
     } catch { showToast('Wake push failed'); }
   };
 
+  const [routeModal, setRouteModal] = useState(null); // { token, staffName }
+  const viewRoute = (token, staffName) => setRouteModal({ token, staffName });
+
   const updateDuration = async (token, hours) => {
     try {
       const res = await fetch(`${API}/api/admin/update-duration`, {
@@ -271,7 +274,8 @@ export default function DashboardPage() {
                   <StaffCard key={s.id} s={s} timeAgo={timeAgo} timeUntil={timeUntil}
                     onStop={adminStopSession} onCopy={copyLink}
                     onWhatsApp={shareWhatsApp} onShare={shareGeneric}
-                    onUpdateDuration={updateDuration} onWakePush={adminWakePush} />
+                    onUpdateDuration={updateDuration} onWakePush={adminWakePush}
+                    onViewRoute={viewRoute} />
                 ))}
               </div>
             </>
@@ -298,7 +302,118 @@ export default function DashboardPage() {
         </>
       )}
 
+      {routeModal && (
+        <RouteModal
+          token={routeModal.token}
+          staffName={routeModal.staffName}
+          jwt={jwt}
+          onClose={() => setRouteModal(null)}
+        />
+      )}
+
       {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════
+//  ROUTE MODAL — shows full movement trail for one staff
+// ══════════════════════════════════════════════════════
+function RouteModal({ token, staffName, jwt, onClose }) {
+  const mapContainer = useRef(null);
+  const mapRef = useRef(null);
+  const [routeData, setRouteData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API}/api/admin/route/${token}`, {
+          headers: { Authorization: `Bearer ${jwt}` },
+        });
+        if (!res.ok) { setError('Failed to load route'); setLoading(false); return; }
+        const data = await res.json();
+        setRouteData(data);
+      } catch { setError('Network error'); }
+      setLoading(false);
+    })();
+  }, [token, jwt]);
+
+  useEffect(() => {
+    if (!routeData || !mapContainer.current || mapRef.current) return;
+    const points = routeData.route;
+    if (points.length === 0) return;
+
+    const center = [points[points.length - 1].lng, points[points.length - 1].lat];
+    const map = new maplibregl.Map({
+      container: mapContainer.current,
+      style: MAP_STYLE,
+      center,
+      zoom: 14,
+      attributionControl: true,
+      failIfMajorPerformanceCaveat: false,
+    });
+    map.addControl(new maplibregl.NavigationControl(), 'top-right');
+    mapRef.current = map;
+
+    map.on('load', () => {
+      const coords = points.map(p => [p.lng, p.lat]);
+      // Route line
+      map.addSource('admin-route', {
+        type: 'geojson',
+        data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords } },
+      });
+      map.addLayer({
+        id: 'admin-route-glow', type: 'line', source: 'admin-route',
+        paint: { 'line-color': '#0d9488', 'line-width': 10, 'line-opacity': 0.15 },
+      });
+      map.addLayer({
+        id: 'admin-route-line', type: 'line', source: 'admin-route',
+        paint: { 'line-color': '#0d9488', 'line-width': 3, 'line-opacity': 0.9 },
+      });
+
+      // Start marker (green)
+      if (coords.length > 0) {
+        const startEl = document.createElement('div');
+        startEl.style.cssText = 'width:14px;height:14px;border-radius:50%;background:#22c55e;border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.3);';
+        new maplibregl.Marker({ element: startEl }).setLngLat(coords[0]).addTo(map);
+      }
+      // End marker (teal with pulse)
+      if (coords.length > 1) {
+        const endEl = document.createElement('div');
+        endEl.innerHTML = '<div style="position:relative;width:20px;height:20px;"><div style="position:absolute;inset:0;border-radius:50%;background:rgba(13,148,136,.3);animation:hmPulse 2s infinite;"></div><div style="position:absolute;top:4px;left:4px;width:12px;height:12px;border-radius:50%;background:#0d9488;border:2px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,.3);"></div></div>';
+        new maplibregl.Marker({ element: endEl }).setLngLat(coords[coords.length - 1]).addTo(map);
+      }
+
+      // Fit bounds
+      if (coords.length > 1) {
+        const bounds = new maplibregl.LngLatBounds();
+        coords.forEach(c => bounds.extend(c));
+        map.fitBounds(bounds, { padding: 50, maxZoom: 16 });
+      }
+    });
+
+    return () => { map.remove(); mapRef.current = null; };
+  }, [routeData]);
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,.5)', backdropFilter: 'blur(4px)' }} onClick={onClose}>
+      <div style={{ width: '90vw', maxWidth: 700, maxHeight: '85vh', background: '#fff', borderRadius: 16, overflow: 'hidden', boxShadow: '0 20px 60px rgba(0,0,0,.2)' }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '16px 20px', borderBottom: '1px solid #e5e7eb', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: '1.1rem' }}>{safe(staffName)} — Route History</h3>
+            {routeData && <p style={{ margin: '2px 0 0', fontSize: '.8rem', color: '#64748b' }}>{routeData.count} GPS points recorded</p>}
+          </div>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: '1.5rem', cursor: 'pointer', color: '#9ca3af', padding: '4px 8px' }}>&times;</button>
+        </div>
+        {loading && <div style={{ padding: 60, textAlign: 'center', color: '#9ca3af' }}>Loading route data...</div>}
+        {error && <div style={{ padding: 60, textAlign: 'center', color: '#ef4444' }}>{error}</div>}
+        {routeData && routeData.route.length === 0 && <div style={{ padding: 60, textAlign: 'center', color: '#9ca3af' }}>No GPS points recorded yet for this session.</div>}
+        {routeData && routeData.route.length > 0 && (
+          <div ref={mapContainer} style={{ width: '100%', height: 450 }} />
+        )}
+      </div>
     </div>
   );
 }
@@ -571,7 +686,7 @@ function formatAlertType(type) {
 // ══════════════════════════════════════════════════════
 //  STAFF CARD (admin-only — shows OSINT + controls + intelligence)
 // ══════════════════════════════════════════════════════
-function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, onShare, onUpdateDuration, onWakePush }) {
+function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, onShare, onUpdateDuration, onWakePush, onViewRoute }) {
   const [showDuration, setShowDuration] = useState(false);
   const [customHours, setCustomHours]   = useState('');
   const [sharePhone, setSharePhone]     = useState(s.recipientPhone || '');
@@ -734,6 +849,13 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
                 <button className="ctrl-btn ctrl-generic" onClick={() => onShare(s.token, s.staffName)}>Share</button>
               </div>
             </div>
+          )}
+          {onViewRoute && loc && (
+            <button className="ctrl-btn" onClick={() => onViewRoute(s.token, s.staffName)} style={{ background: '#f0fdf4', color: '#166534', border: '1px solid #86efac' }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/>
+              </svg> View Route
+            </button>
           )}
           <button className="ctrl-btn ctrl-duration" onClick={() => setShowDuration(!showDuration)}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">

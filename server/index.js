@@ -911,6 +911,34 @@ async function build() {
     };
   });
 
+  /** GET /api/admin/route/:token — Admin gets full route history for a session */
+  app.get('/api/admin/route/:token', { preHandler: requireAdmin }, async (req, reply) => {
+    const { token } = req.params;
+    if (!isValidToken(token)) return reply.code(400).send({ error: 'Invalid token' });
+
+    const sess = await db.query(
+      `SELECT id FROM tracking_sessions WHERE token=$1`, [token]);
+    if (sess.rows.length === 0) return reply.code(404).send({ error: 'Session not found' });
+
+    const { rows } = await db.query(
+      `SELECT lat, lng, raw_lat, raw_lng, accuracy, speed, heading, recorded_at
+       FROM location_points
+       WHERE session_id = $1
+       ORDER BY recorded_at ASC
+       LIMIT 5000`,
+      [sess.rows[0].id]);
+
+    return {
+      route: rows.map(r => ({
+        lat: r.lat, lng: r.lng,
+        rawLat: r.raw_lat, rawLng: r.raw_lng,
+        accuracy: r.accuracy, speed: r.speed,
+        heading: r.heading, ts: r.recorded_at,
+      })),
+      count: rows.length,
+    };
+  });
+
   /** Admin updates session duration (extends/shortens expiry) */
   app.post('/api/admin/update-duration', { preHandler: requireAdmin }, async (req, reply) => {
     const { token, hours } = req.body || {};
@@ -1017,11 +1045,13 @@ async function build() {
           // Device update — store latest device state (battery, network, dev tools)
           if (msg.type === 'device_update') {
             try {
+              // DO NOT update last_update here — device_update is metadata only
+              // last_update must ONLY change when REAL GPS data arrives
               await db.query(
                 `UPDATE tracking_sessions SET last_battery=COALESCE($1::jsonb, last_battery),
                  last_network=COALESCE($2::jsonb, last_network),
                  heartbeat_checks=COALESCE($3::jsonb, heartbeat_checks),
-                 last_update=NOW()
+                 last_heartbeat=NOW()
                  WHERE token=$4`,
                 [msg.battery ? JSON.stringify(msg.battery) : null,
                  msg.network ? JSON.stringify(msg.network) : null,
