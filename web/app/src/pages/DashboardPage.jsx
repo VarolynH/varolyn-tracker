@@ -96,6 +96,17 @@ export default function DashboardPage() {
     } catch {}
   };
 
+  const adminWakePush = async (token) => {
+    try {
+      const res = await fetch(`${API}/api/admin/wake-push`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json();
+      showToast(data.message || (data.success ? 'Wake push sent' : 'Push failed'));
+    } catch { showToast('Wake push failed'); }
+  };
+
   const updateDuration = async (token, hours) => {
     try {
       const res = await fetch(`${API}/api/admin/update-duration`, {
@@ -260,7 +271,7 @@ export default function DashboardPage() {
                   <StaffCard key={s.id} s={s} timeAgo={timeAgo} timeUntil={timeUntil}
                     onStop={adminStopSession} onCopy={copyLink}
                     onWhatsApp={shareWhatsApp} onShare={shareGeneric}
-                    onUpdateDuration={updateDuration} />
+                    onUpdateDuration={updateDuration} onWakePush={adminWakePush} />
                 ))}
               </div>
             </>
@@ -560,7 +571,7 @@ function formatAlertType(type) {
 // ══════════════════════════════════════════════════════
 //  STAFF CARD (admin-only — shows OSINT + controls + intelligence)
 // ══════════════════════════════════════════════════════
-function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, onShare, onUpdateDuration }) {
+function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, onShare, onUpdateDuration, onWakePush }) {
   const [showDuration, setShowDuration] = useState(false);
   const [customHours, setCustomHours]   = useState('');
   const [sharePhone, setSharePhone]     = useState(s.recipientPhone || '');
@@ -740,6 +751,13 @@ function StaffCard({ s, timeAgo, timeUntil, past, onStop, onCopy, onWhatsApp, on
               <button className="ctrl-btn ctrl-copy" onClick={handleCustomDuration}>Set</button>
               <button className="ctrl-btn" onClick={() => setShowDuration(false)} style={{ background: 'var(--gray-100)' }}>Cancel</button>
             </div></div>
+          )}
+          {isOffline && onWakePush && (
+            <button className="ctrl-btn" onClick={() => onWakePush(s.token)} style={{ background: '#fbbf24', color: '#78350f', border: '1px solid #f59e0b' }}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+              </svg> Wake Device
+            </button>
           )}
           <button className="ctrl-btn ctrl-stop" onClick={() => onStop(s.token)}>
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="6" y="6" width="12" height="12" rx="1"/></svg> Stop Tracking

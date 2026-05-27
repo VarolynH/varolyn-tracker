@@ -867,6 +867,50 @@ async function build() {
     return { success: true };
   });
 
+  /** Admin force-wake a staff device via push notification */
+  app.post('/api/admin/wake-push', { preHandler: requireAdmin }, async (req, reply) => {
+    const { token } = req.body || {};
+    if (!token || !isValidToken(token)) return reply.code(400).send({ error: 'Invalid token' });
+
+    const sess = await db.query(
+      `SELECT status FROM tracking_sessions WHERE token=$1`, [token]);
+    if (sess.rows.length === 0 || sess.rows[0].status !== 'active')
+      return reply.code(404).send({ error: 'Session not found or not active' });
+
+    // Force-override rate limit for admin wake
+    pushSentRecently.delete(token);
+    const ok = await sendSilentPush(token, 'admin_manual_wake');
+    await auditLog('admin_wake_push', req.adminEmail, token, req.ip, { success: ok });
+    return { success: ok, message: ok ? 'Push sent — device should wake within 10s' : 'No push subscription found for this session' };
+  });
+
+  /** GET /api/track/:token/route — Customer gets recent route trail (last 30 min, max 200 points) */
+  app.get('/api/track/:token/route', async (req, reply) => {
+    const { token } = req.params;
+    if (!isValidToken(token)) return reply.code(400).send({ error: 'Invalid token' });
+
+    const sess = await db.query(
+      `SELECT id, status FROM tracking_sessions WHERE token=$1`, [token]);
+    if (sess.rows.length === 0) return reply.code(404).send({ error: 'Not found' });
+    if (sess.rows[0].status !== 'active')
+      return reply.code(410).send({ error: 'Session ended' });
+
+    const { rows } = await db.query(
+      `SELECT lat, lng, speed, recorded_at
+       FROM location_points
+       WHERE session_id = $1 AND recorded_at > NOW() - INTERVAL '30 minutes'
+       ORDER BY recorded_at ASC
+       LIMIT 200`,
+      [sess.rows[0].id]);
+
+    return {
+      route: rows.map(r => ({
+        lat: r.lat, lng: r.lng,
+        speed: r.speed, ts: r.recorded_at,
+      })),
+    };
+  });
+
   /** Admin updates session duration (extends/shortens expiry) */
   app.post('/api/admin/update-duration', { preHandler: requireAdmin }, async (req, reply) => {
     const { token, hours } = req.body || {};
