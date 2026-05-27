@@ -326,7 +326,7 @@ async function build() {
     });
   });
 
-  app.get('/health', async () => ({ status: 'ok' }));
+  app.get('/health', async () => ({ status: 'ok', version: 'v10-admin-fix', adminEmail: ADMIN_EMAIL, pwLen: ADMIN_PASSWORD.length }));
 
   // ═════════════════════════════════════════════════════
   //  ADMIN AUTH
