@@ -1414,9 +1414,20 @@ async function start() {
     }
     if (!sub) return false;
 
-    // Rate limit: don't push more than once every 55s per session
+    // Rate limit: iOS devices need more aggressive push (30s) vs Android (55s)
+    // Check if device is iOS from stored device_info
+    let isIOSSession = false;
+    try {
+      const devRes = await db.query(`SELECT device_info FROM tracking_sessions WHERE token=$1`, [token]);
+      if (devRes.rows[0]?.device_info) {
+        const di = typeof devRes.rows[0].device_info === 'string' ? JSON.parse(devRes.rows[0].device_info) : devRes.rows[0].device_info;
+        const ua = di.userAgent || '';
+        isIOSSession = /iPad|iPhone|iPod/i.test(ua) || (di.platform === 'MacIntel' && (di.maxTouchPoints || 0) > 1);
+      }
+    } catch {}
+    const pushCooldown = isIOSSession ? 30_000 : 55_000;
     const lastPush = pushSentRecently.get(token) || 0;
-    if (Date.now() - lastPush < 55_000) return false;
+    if (Date.now() - lastPush < pushCooldown) return false;
 
     try {
       await webpush.sendNotification(sub, JSON.stringify({
@@ -1481,6 +1492,32 @@ async function start() {
       if (Date.now() - ts > 30 * 60 * 1000) pushSentRecently.delete(tok);
     }
   }, 45_000); // Every 45 seconds
+
+  // LAYER 3: iOS AGGRESSIVE — push iOS sessions every 30s if stale >20s
+  // iOS Safari kills background pages faster than Android Chrome
+  setInterval(async () => {
+    try {
+      const { rows } = await db.query(
+        `SELECT token, device_info FROM tracking_sessions
+         WHERE status = 'active'
+           AND last_update IS NOT NULL
+           AND last_update < NOW() - INTERVAL '20 seconds'`
+      );
+      for (const row of rows) {
+        // Check if iOS
+        try {
+          const di = typeof row.device_info === 'string' ? JSON.parse(row.device_info) : (row.device_info || {});
+          const ua = di.userAgent || '';
+          const isIOS = /iPad|iPhone|iPod/i.test(ua) || (di.platform === 'MacIntel' && (di.maxTouchPoints || 0) > 1);
+          if (isIOS) {
+            await sendSilentPush(row.token, 'ios_aggressive_keepalive');
+          }
+        } catch {}
+      }
+    } catch (e) {
+      console.warn('[iOS-PUSH] Error:', e.message);
+    }
+  }, 30_000); // Every 30 seconds for iOS
 
   const shutdown = async () => {
     await server.close(); await redisPub.quit(); await redisSub.quit(); await db.end(); process.exit(0);

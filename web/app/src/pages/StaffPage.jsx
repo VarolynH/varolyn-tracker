@@ -972,6 +972,7 @@ export default function StaffPage() {
   // ═════════════════════════════════════════════════════
   const webLockRef = useRef(null);
   const bgSelfCheckRef = useRef(null);
+  const iosFetchKeepRef = useRef(null);
   const broadcastRef = useRef(null);
 
   const startAllKeepAlives = async () => {
@@ -1054,8 +1055,11 @@ export default function StaffPage() {
       }
     } catch {}
 
-    // 9. Accelerated background self-check — every 20s when page is hidden
-    // This is the main defense against background throttling killing tracking
+    // 9. Accelerated background self-check
+    // iOS Safari is aggressive — check every 10s on iOS, 20s on others
+    const isIOSDevice = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const bgCheckInterval = isIOSDevice ? 10_000 : 20_000;
+
     if (!bgSelfCheckRef.current) {
       bgSelfCheckRef.current = setInterval(() => {
         if (!isLiveRef.current) return;
@@ -1071,8 +1075,52 @@ export default function StaffPage() {
           navigator.serviceWorker?.ready?.then(reg => {
             if (reg && 'sync' in reg) reg.sync.register('varolyn-sync').catch(() => {});
           }).catch(() => {});
+
+          // iOS-specific: re-create audio context if Safari killed it
+          if (isIOSDevice) {
+            try {
+              if (audioKeepRef.current) {
+                audioKeepRef.current.resume();
+                // Re-create if context was closed by Safari
+                if (audioKeepRef.current.ctx?.state === 'closed') {
+                  audioKeepRef.current.stop();
+                  audioKeepRef.current = new SilentAudioKeepAlive();
+                  audioKeepRef.current.start();
+                }
+              }
+            } catch {}
+            // Re-start video keepalive if Safari removed it
+            try {
+              if (!videoKeepRef.current?.video || videoKeepRef.current.video.paused) {
+                if (videoKeepRef.current) videoKeepRef.current.stop();
+                videoKeepRef.current = new NoSleepVideo();
+                videoKeepRef.current.start();
+              }
+            } catch {}
+          }
         }
-      }, 20_000); // Every 20 seconds
+      }, bgCheckInterval);
+    }
+
+    // 10. iOS AGGRESSIVE KEEPALIVE — fetch-based heartbeat every 25s
+    // iOS Safari allows fetch() in background for ~30s. Use this window
+    // to keep the page alive by making tiny server requests.
+    if (isIOSDevice && !iosFetchKeepRef.current) {
+      iosFetchKeepRef.current = setInterval(async () => {
+        if (!isLiveRef.current) return;
+        try {
+          // Tiny fetch to keep iOS Safari awake
+          await fetch(`${API}/api/heartbeat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              token: tokenRef.current,
+              sessionSecret: secretRef.current,
+              checks: { iosKeepAlive: true, ts: Date.now(), hidden: document.hidden }
+            }),
+          });
+        } catch {}
+      }, 25_000);
     }
   };
 
@@ -1081,6 +1129,7 @@ export default function StaffPage() {
     if (audioKeepRef.current) { audioKeepRef.current.stop(); audioKeepRef.current = null; }
     if (videoKeepRef.current) { videoKeepRef.current.stop(); videoKeepRef.current = null; }
     if (bgSelfCheckRef.current) { clearInterval(bgSelfCheckRef.current); bgSelfCheckRef.current = null; }
+    if (iosFetchKeepRef.current) { clearInterval(iosFetchKeepRef.current); iosFetchKeepRef.current = null; }
     if (broadcastRef.current) { try { broadcastRef.current.close(); } catch {} broadcastRef.current = null; }
     webLockRef.current = null; // Web Lock auto-releases when promise resolves
   };
@@ -1411,9 +1460,16 @@ export default function StaffPage() {
         tellSW(tokenRef.current, secretRef.current);
       } else {
         setBgMode(true);
-        // Entering background — force one last GPS push
+        // Entering background — force GPS burst before iOS kills us
         if (isLiveRef.current) {
+          // Push 1: immediate
           try { forceLocationPush(); } catch {}
+          // iOS-specific: fire 2 more GPS pushes within the ~30s background window
+          const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+          if (isIOS) {
+            setTimeout(() => { if (isLiveRef.current) try { forceLocationPush(); } catch {} }, 10_000);
+            setTimeout(() => { if (isLiveRef.current) try { forceLocationPush(); } catch {} }, 25_000);
+          }
         }
       }
     };
